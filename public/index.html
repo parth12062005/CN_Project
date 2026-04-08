@@ -1,0 +1,1449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StreamBox — Video Library</title>
+  <meta name="description" content="HLS video streaming library for local network" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-card: #12121a;
+      --bg-card-hover: #1a1a28;
+      --border: #1e1e2e;
+      --text-primary: #e4e4ef;
+      --text-secondary: #8888a4;
+      --accent: #6c5ce7;
+      --accent-glow: rgba(108, 92, 231, 0.25);
+      --success: #00d68f;
+      --warning: #ffaa00;
+      --error: #ff4757;
+      --radius: 16px;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse at 20% 0%, rgba(108, 92, 231, 0.08) 0%, transparent 60%),
+        radial-gradient(ellipse at 80% 100%, rgba(0, 214, 143, 0.05) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ─── Header ─────────────────────────── */
+    header {
+      width: 100%;
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 1px solid var(--border);
+      position: relative;
+      z-index: 1;
+    }
+
+    .logo {
+      width: 40px; height: 40px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent), #a29bfe);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      box-shadow: 0 4px 20px var(--accent-glow);
+    }
+
+    header h1 {
+      font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em;
+    }
+    header h1 span { color: var(--text-secondary); font-weight: 400; margin-left: 8px; font-size: 0.85rem; }
+
+    .header-right {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 12px;
+    }
+
+    .status-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 100px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      font-size: 0.8rem; font-weight: 500; color: var(--text-secondary);
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-secondary); transition: background 0.3s; }
+    .status-dot.live { background: var(--success); box-shadow: 0 0 8px rgba(0,214,143,0.5); animation: pulse 2s ease-in-out infinite; }
+    .status-dot.error { background: var(--error); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+    /* ─── LAN Bar ────────────────────────── */
+    .lan-bar {
+      width: 100%; padding: 10px 32px;
+      background: rgba(108,92,231,0.06);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 20px;
+      font-size: 0.82rem;
+      position: relative; z-index: 1;
+      flex-wrap: wrap;
+    }
+    .lan-item { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+    .lan-item strong { color: var(--text-primary); font-weight: 600; }
+    .lan-url {
+      padding: 4px 12px;
+      background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+      font-family: 'JetBrains Mono','Fira Code', monospace;
+      font-size: 0.78rem; color: var(--accent);
+      cursor: pointer; user-select: all;
+      transition: border-color 0.2s;
+    }
+    .lan-url:hover { border-color: var(--accent); }
+    .copy-toast { font-size: 0.72rem; color: var(--success); opacity: 0; transition: opacity 0.3s; }
+    .copy-toast.show { opacity: 1; }
+
+    /* ─── Main ───────────────────────────── */
+    main {
+      width: 100%; max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      position: relative; z-index: 1;
+    }
+
+    /* ─── LIBRARY VIEW ───────────────────── */
+    #libraryView {}
+    .library-title {
+      font-size: 1.6rem; font-weight: 800; letter-spacing: -0.03em;
+      margin-bottom: 24px;
+    }
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+    .video-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      cursor: pointer;
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+    }
+    .video-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(108,92,231,0.4);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+    }
+    .card-thumb {
+      width: 100%; aspect-ratio: 16/9;
+      object-fit: cover; display: block;
+      background: #1a1a28;
+    }
+    .card-thumb-placeholder {
+      width: 100%; aspect-ratio: 16/9;
+      background: linear-gradient(135deg, #1a1a28, #12121a);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 2.5rem; color: var(--text-secondary);
+    }
+    .card-body { padding: 16px; }
+    .card-title {
+      font-size: 1rem; font-weight: 600; margin-bottom: 6px;
+      letter-spacing: -0.01em;
+    }
+    .card-meta {
+      font-size: 0.78rem; color: var(--text-secondary);
+    }
+    .empty-library {
+      text-align: center; padding: 60px 20px;
+      color: var(--text-secondary);
+    }
+    .empty-library h2 { font-size: 1.2rem; margin-bottom: 10px; color: var(--text-primary); }
+    .empty-library code {
+      display: inline-block; margin-top: 12px; padding: 8px 16px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 8px; font-size: 0.85rem; color: var(--accent);
+    }
+
+    /* ─── PLAYER VIEW ────────────────────── */
+    #playerView { display: none; }
+
+    .back-btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 18px; margin-bottom: 20px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 10px; color: var(--text-primary);
+      font-size: 0.85rem; font-weight: 500;
+      cursor: pointer; transition: background 0.2s, border-color 0.2s;
+    }
+    .back-btn:hover { background: var(--bg-card-hover); border-color: var(--accent); }
+
+    .now-playing-title {
+      font-size: 1.3rem; font-weight: 700; margin-bottom: 20px;
+      letter-spacing: -0.02em;
+    }
+
+    .player-container {
+      width: 100%;
+      border-radius: var(--radius);
+      overflow: hidden; background: #000;
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+      position: relative;
+    }
+    video { width: 100%; display: block; aspect-ratio: 16/9; background: #000; }
+
+    .player-overlay {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.7); backdrop-filter: blur(8px);
+      opacity: 1; transition: opacity 0.4s; pointer-events: none; z-index: 2;
+    }
+    .player-overlay.hidden { opacity: 0; }
+    .player-overlay .spinner {
+      width: 48px; height: 48px;
+      border: 3px solid rgba(255,255,255,0.1); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 16px;
+    }
+    .player-overlay p { color: var(--text-secondary); font-size: 0.9rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Stats + Cache Grid ─────────────── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 14px; margin-top: 20px;
+    }
+
+    .stat-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px 18px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .stat-card:hover { background: var(--bg-card-hover); border-color: rgba(108,92,231,0.3); }
+    .stat-label {
+      font-size: 0.7rem; color: var(--text-secondary);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      font-weight: 600; margin-bottom: 4px;
+    }
+    .stat-value {
+      font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ─── Cache Visualizer ───────────────── */
+    .cache-section {
+      margin-top: 20px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden;
+    }
+    .cache-header {
+      padding: 14px 20px;
+      font-size: 0.8rem; font-weight: 600; color: var(--text-secondary);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .cache-header .cache-params {
+      margin-left: auto; font-weight: 400; font-size: 0.75rem;
+    }
+    .cache-vis {
+      padding: 16px 20px;
+      display: flex; flex-wrap: wrap; gap: 4px;
+      align-items: center;
+    }
+    .chunk-block {
+      width: 28px; height: 28px;
+      border-radius: 5px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.55rem; font-weight: 600;
+      transition: all 0.3s;
+      border: 1px solid transparent;
+    }
+    .chunk-block.empty {
+      background: rgba(255,255,255,0.03);
+      color: var(--text-secondary);
+      border-color: var(--border);
+    }
+    .chunk-block.cached {
+      background: rgba(108,92,231,0.2);
+      color: var(--accent);
+      border-color: rgba(108,92,231,0.4);
+    }
+    .chunk-block.playing {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+      box-shadow: 0 0 10px var(--accent-glow);
+    }
+    .chunk-block.evicted {
+      background: rgba(255,71,87,0.08);
+      color: rgba(255,71,87,0.4);
+      border-color: rgba(255,71,87,0.15);
+    }
+
+    .cache-legend {
+      padding: 10px 20px 14px;
+      display: flex; gap: 16px; flex-wrap: wrap;
+      font-size: 0.72rem; color: var(--text-secondary);
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-dot {
+      width: 10px; height: 10px; border-radius: 3px;
+    }
+
+    /* ─── Event Log ──────────────────────── */
+    .log-section {
+      margin-top: 20px;
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 12px; overflow: hidden;
+    }
+    .log-header {
+      padding: 14px 20px;
+      font-size: 0.8rem; font-weight: 600; color: var(--text-secondary);
+      text-transform: uppercase; letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 8px;
+    }
+    .log-body {
+      padding: 14px 20px; max-height: 150px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono','Fira Code', monospace;
+      font-size: 0.75rem; line-height: 1.7;
+      color: var(--text-secondary);
+    }
+    .log-body::-webkit-scrollbar { width: 6px; }
+    .log-body::-webkit-scrollbar-track { background: transparent; }
+    .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .log-entry { opacity: 0; animation: fadeIn 0.3s forwards; }
+    @keyframes fadeIn { to { opacity: 1; } }
+    .log-time { color: var(--accent); margin-right: 8px; }
+
+    /* ─── Username Modal ──────────────── */
+    .username-modal {
+      position: fixed; inset: 0; z-index: 1000;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.8); backdrop-filter: blur(12px);
+    }
+    .username-modal.hidden { display: none; }
+    .username-box {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 40px; width: 380px;
+      text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+    .username-box h2 { font-size: 1.3rem; margin-bottom: 8px; }
+    .username-box p { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 24px; }
+    .username-box input {
+      width: 100%; padding: 12px 16px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--bg-primary);
+      color: var(--text-primary); font-size: 1rem; font-family: inherit;
+      outline: none; transition: border-color 0.2s; margin-bottom: 16px;
+    }
+    .username-box input:focus { border-color: var(--accent); }
+    .username-box button {
+      width: 100%; padding: 12px; border-radius: 10px; border: none;
+      background: linear-gradient(135deg, var(--accent), #a29bfe);
+      color: #fff; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+      transition: opacity 0.2s; font-family: inherit;
+    }
+    .username-box button:hover { opacity: 0.9; }
+
+    /* ─── P2P chunk color ─────────────── */
+    .chunk-block.p2p {
+      background: rgba(0, 214, 143, 0.2);
+      color: var(--success);
+      border-color: rgba(0, 214, 143, 0.4);
+    }
+
+    footer {
+      padding: 20px; text-align: center;
+      font-size: 0.78rem; color: var(--text-secondary);
+      position: relative; z-index: 1;
+    }
+
+    @media (max-width: 600px) {
+      header { padding: 16px; }
+      .lan-bar { padding: 10px 16px; }
+      main { padding: 16px; }
+      .video-grid { grid-template-columns: 1fr; }
+      .stats-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══ USERNAME MODAL ═══ -->
+<div class="username-modal" id="usernameModal">
+  <div class="username-box">
+    <h2>👋 Welcome to StreamBox</h2>
+    <p>Enter a display name to join the P2P network</p>
+    <input type="text" id="usernameInput" placeholder="Your name..." maxlength="24" autocomplete="off" />
+    <button id="usernameSubmit">Join Network</button>
+  </div>
+</div>
+
+<header>
+  <div class="logo">▶</div>
+  <h1>StreamBox <span id="headerSubtitle">Library</span></h1>
+  <div class="header-right">
+    <div class="status-badge">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Loading…</span>
+    </div>
+  </div>
+</header>
+
+<div class="lan-bar">
+  <div class="lan-item">📡 <strong>Server:</strong> <span id="lanIP">…</span></div>
+  <div class="lan-item">🔗 <strong>Share:</strong>
+    <span class="lan-url" id="lanURL" title="Click to copy">—</span>
+    <span class="copy-toast" id="copyToast">Copied!</span>
+  </div>
+</div>
+
+<main>
+  <!-- ═══ LIBRARY VIEW ═══ -->
+  <div id="libraryView">
+    <h2 class="library-title">Video Library</h2>
+    <div class="video-grid" id="videoGrid"></div>
+  </div>
+
+  <!-- ═══ PLAYER VIEW ═══ -->
+  <div id="playerView">
+    <button class="back-btn" id="backBtn">← Library</button>
+    <div class="now-playing-title" id="nowPlayingTitle"></div>
+
+    <div class="player-container">
+      <video id="videoPlayer" controls playsinline></video>
+      <div class="player-overlay" id="overlay">
+        <div class="spinner"></div>
+        <p id="overlayText">Loading stream…</p>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Resolution</div><div class="stat-value" id="statResolution">—</div></div>
+      <div class="stat-card"><div class="stat-label">Bitrate</div><div class="stat-value" id="statBitrate">—</div></div>
+      <div class="stat-card"><div class="stat-label">Buffer</div><div class="stat-value" id="statBuffer">—</div></div>
+      <div class="stat-card"><div class="stat-label">Segments</div><div class="stat-value" id="statSegments">0</div></div>
+      <div class="stat-card"><div class="stat-label">Cached</div><div class="stat-value" id="statCached">0</div></div>
+      <div class="stat-card"><div class="stat-label">Evicted</div><div class="stat-value" id="statEvicted">0</div></div>
+      <div class="stat-card"><div class="stat-label">P2P %</div><div class="stat-value" id="statP2P">0%</div></div>
+      <div class="stat-card"><div class="stat-label">Source</div><div class="stat-value" id="statSource" style="font-size:0.8rem">—</div></div>
+    </div>
+
+    <!-- Cache visualizer -->
+    <div class="cache-section">
+      <div class="cache-header">
+        <span>📦</span> Chunk Cache
+        <span class="cache-params" id="cacheParams">t=? / t'=?</span>
+      </div>
+      <div class="cache-vis" id="cacheVis"></div>
+      <div class="cache-legend">
+        <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> Playing</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(108,92,231,0.3)"></div> Cached</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(255,255,255,0.05);border:1px solid var(--border)"></div> Not loaded</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(255,71,87,0.15)"></div> Evicted</div>
+        <div class="legend-item"><div class="legend-dot" style="background:rgba(0,214,143,0.3)"></div> P2P</div>
+      </div>
+    </div>
+
+    <div class="log-section">
+      <div class="log-header"><span>◉</span> Event Log</div>
+      <div class="log-body" id="logBody"></div>
+    </div>
+  </div>
+</main>
+
+<footer>StreamBox &mdash; HLS Streamer with Chunk Caching</footer>
+
+<script>
+// ═══════════════════════════════════════════════
+//  CONFIG
+// ═══════════════════════════════════════════════
+const CACHE_T       = 3;   // chunks to keep BEHIND current
+const CACHE_T_PRIME = 5;   // chunks to prefetch AHEAD of current
+const CHUNK_DURATION = 4;  // seconds per chunk (must match ffmpeg -hls_time)
+const PEER_ID = 'peer_' + Math.random().toString(36).slice(2, 10);
+const WEBRTC_ID = 'wrtc_' + Math.random().toString(36).slice(2, 10);
+const INVENTORY_INTERVAL = 5000;
+const P2P_HAVE_TIMEOUT  = 100;   // ms to wait for have_chunk response
+const P2P_CHUNK_TIMEOUT = 2000;  // ms to wait for chunk data
+const CONN_IDLE_TIMEOUT = 30000; // ms before closing idle peer connections
+const DC_CHUNK_SIZE = 16384;     // 16KB DataChannel send slices
+
+let USERNAME = sessionStorage.getItem('streambox_username') || '';
+
+// ═══════════════════════════════════════════════
+//  CHUNK CACHE CLASS (extended with binary data)
+//
+//  Sliding window: [current - t, current + t']
+//  Now stores actual ArrayBuffer data so peers
+//  can serve cached chunks via DataChannel.
+// ═══════════════════════════════════════════════
+class ChunkCache {
+  constructor(t, tPrime) {
+    this.t = t;
+    this.tPrime = tPrime;
+    this.cache = new Map();      // segIndex → { data: ArrayBuffer|null, timestamp, source }
+    this.evictedSet = new Set();
+    this.currentSegment = -1;
+    this.totalSegments = 0;
+    this.evictionCount = 0;
+    this.p2pSet = new Set();     // segments fetched via P2P
+  }
+
+  store(segIndex, data = null, source = 'server') {
+    if (this.currentSegment >= 0) {
+      const lo = this.currentSegment - this.t;
+      const hi = this.currentSegment + this.tPrime;
+      if (segIndex < lo || segIndex > hi) return false;
+    }
+    this.cache.set(segIndex, { data, timestamp: Date.now(), source });
+    this.evictedSet.delete(segIndex);
+    if (source === 'p2p') this.p2pSet.add(segIndex);
+    return true;
+  }
+
+  has(segIndex) { return this.cache.has(segIndex); }
+
+  getData(segIndex) {
+    const entry = this.cache.get(segIndex);
+    return entry ? entry.data : null;
+  }
+
+  get(segIndex) { return this.getData(segIndex); }
+
+  isP2P(segIndex) { return this.p2pSet.has(segIndex); }
+
+  setCurrentSegment(segIndex) {
+    if (segIndex === this.currentSegment) return;
+    this.currentSegment = segIndex;
+    this._evict();
+  }
+
+  _evict() {
+    if (this.currentSegment < 0) return;
+    const lo = this.currentSegment - this.t;
+    const hi = this.currentSegment + this.tPrime;
+    const toEvict = [];
+    for (const [idx] of this.cache) {
+      if (idx < lo || idx > hi) toEvict.push(idx);
+    }
+    for (const idx of toEvict) {
+      this.cache.delete(idx);
+      this.evictedSet.add(idx);
+      this.evictionCount++;
+    }
+    return toEvict;
+  }
+
+  getInventory() {
+    return Array.from(this.cache.keys()).sort((a, b) => a - b);
+  }
+
+  getWindow() {
+    const cur = Math.max(0, this.currentSegment);
+    return {
+      lo: Math.max(0, cur - this.t),
+      hi: Math.min(this.totalSegments - 1, cur + this.tPrime),
+      current: cur,
+    };
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  SIGNALING CLIENT (WebSocket)
+// ═══════════════════════════════════════════════
+class SignalingClient {
+  constructor() {
+    this.ws = null;
+    this.handlers = {};  // type → callback
+    this.connected = false;
+  }
+
+  connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${proto}://${location.host}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.onopen = () => {
+      this.connected = true;
+      this.ws.send(JSON.stringify({ type: 'join', webrtcId: WEBRTC_ID }));
+      log('🔌 WebSocket connected');
+    };
+
+    this.ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      const handler = this.handlers[msg.type];
+      if (handler) handler(msg);
+    };
+
+    this.ws.onclose = () => {
+      this.connected = false;
+      log('🔌 WebSocket disconnected — reconnecting in 3s');
+      setTimeout(() => this.connect(), 3000);
+    };
+
+    this.ws.onerror = () => {};
+  }
+
+  on(type, cb) { this.handlers[type] = cb; }
+
+  send(msg) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  PEER CONNECTION MANAGER (WebRTC DataChannel)
+//
+//  Maintains a pool of RTCPeerConnections.
+//  Each connection has a DataChannel "chunks"
+//  for bidirectional chunk transfer.
+// ═══════════════════════════════════════════════
+class PeerConnectionManager {
+  constructor(signaling, cache) {
+    this.signaling = signaling;
+    this.cache = cache;
+    this.connections = new Map(); // webrtcId → { pc, dc, lastUsed, pendingRequests, ready }
+    this.pendingDCMessages = new Map(); // webrtcId → resolver map (msgId → {resolve, timer})
+
+    // Handle incoming signaling messages
+    signaling.on('offer', (msg) => this._handleOffer(msg));
+    signaling.on('answer', (msg) => this._handleAnswer(msg));
+    signaling.on('ice-candidate', (msg) => this._handleICE(msg));
+
+    // Idle connection cleanup
+    setInterval(() => this._cleanIdle(), 10000);
+  }
+
+  // Get or create a connection to a peer
+  async getConnection(webrtcId) {
+    const existing = this.connections.get(webrtcId);
+    if (existing && existing.ready && existing.dc && existing.dc.readyState === 'open') {
+      existing.lastUsed = Date.now();
+      return existing;
+    }
+
+    log(`🔗 Opening WebRTC connection to ${webrtcId.slice(0, 8)}…`);
+    return this._createConnection(webrtcId, true);
+  }
+
+  async _createConnection(webrtcId, isInitiator) {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    const conn = {
+      pc,
+      dc: null,
+      lastUsed: Date.now(),
+      pendingRequests: new Map(),
+      ready: false,
+      reassembly: new Map(),
+    };
+
+    this.connections.set(webrtcId, conn);
+
+    // ICE candidates
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        this.signaling.send({
+          type: 'ice-candidate',
+          target: webrtcId,
+          payload: e.candidate,
+        });
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        this._cleanup(webrtcId);
+      }
+    };
+
+    if (isInitiator) {
+      // Create DataChannel
+      const dc = pc.createDataChannel('chunks', { ordered: true });
+      dc.binaryType = 'arraybuffer';
+      conn.dc = dc;
+      this._setupDC(dc, webrtcId, conn);
+
+      // Create offer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      this.signaling.send({
+        type: 'offer',
+        target: webrtcId,
+        payload: pc.localDescription,
+      });
+
+      // Wait for DC to open
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('DC open timeout')), 5000);
+        dc.onopen = () => { clearTimeout(timeout); conn.ready = true; log(`🤝 DataChannel open (outgoing to ${webrtcId.slice(0, 8)})`); resolve(); };
+        dc.onerror = () => { clearTimeout(timeout); reject(new Error('DC error')); };
+      });
+    } else {
+      // Wait for incoming DataChannel
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('DC incoming timeout')), 5000);
+        pc.ondatachannel = (evt) => {
+          clearTimeout(timeout);
+          const dc = evt.channel;
+          dc.binaryType = 'arraybuffer';
+          conn.dc = dc;
+          this._setupDC(dc, webrtcId, conn);
+          dc.onopen = () => { conn.ready = true; resolve(); };
+        };
+      });
+    }
+
+    return conn;
+  }
+
+  _setupDC(dc, webrtcId, conn) {
+    dc.onmessage = (evt) => {
+      if (typeof evt.data === 'string') {
+        // JSON control message
+        let msg;
+        try { msg = JSON.parse(evt.data); } catch { return; }
+
+        if (msg.type === 'have_chunk') {
+          // Peer is asking if we have a chunk
+          const have = this.cache ? this.cache.has(msg.chunkId) : false;
+          dc.send(JSON.stringify({
+            type: 'have_chunk_response',
+            chunkId: msg.chunkId,
+            have,
+          }));
+        } else if (msg.type === 'have_chunk_response') {
+          const req = conn.pendingRequests.get('have_' + msg.chunkId);
+          if (req) { clearTimeout(req.timer); req.resolve(msg.have); conn.pendingRequests.delete('have_' + msg.chunkId); }
+        } else if (msg.type === 'chunk_request') {
+          // Peer wants a chunk — send it
+          this._serveChunk(dc, msg.chunkId);
+        } else if (msg.type === 'chunk_header') {
+          // Start reassembly
+          conn.reassembly.set(msg.chunkId, {
+            totalSize: msg.totalSize,
+            received: [],
+            receivedBytes: 0,
+          });
+        } else if (msg.type === 'chunk_complete') {
+          // Finalize reassembly
+          const ra = conn.reassembly.get(msg.chunkId);
+          if (ra) {
+            const fullBuf = this._concat(ra.received, ra.totalSize);
+            conn.reassembly.delete(msg.chunkId);
+            const req = conn.pendingRequests.get('chunk_' + msg.chunkId);
+            if (req) { clearTimeout(req.timer); req.resolve(fullBuf); conn.pendingRequests.delete('chunk_' + msg.chunkId); }
+          }
+        } else if (msg.type === 'chunk_not_found') {
+          const req = conn.pendingRequests.get('chunk_' + msg.chunkId);
+          if (req) { clearTimeout(req.timer); req.resolve(null); conn.pendingRequests.delete('chunk_' + msg.chunkId); }
+        }
+      } else {
+        // Binary data — part of a chunk transfer (reassembly)
+        // We need to figure out which chunkId this belongs to.
+        // Since we use ordered DC, it belongs to the most recent reassembly.
+        for (const [, ra] of conn.reassembly) {
+          ra.received.push(new Uint8Array(evt.data));
+          ra.receivedBytes += evt.data.byteLength;
+          break; // ordered — only one active at a time
+        }
+      }
+    };
+
+    dc.onclose = () => this._cleanup(webrtcId);
+    dc.onerror = () => this._cleanup(webrtcId);
+  }
+
+  async _serveChunk(dc, chunkId) {
+    if (!this.cache) { dc.send(JSON.stringify({ type: 'chunk_not_found', chunkId })); return; }
+    const data = this.cache.getData(chunkId);
+    if (!data || data === true || !(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) {
+      // No binary data available (only a marker) — can't serve
+      dc.send(JSON.stringify({ type: 'chunk_not_found', chunkId }));
+      log(`🚫 Can't serve seg${chunkId} — no binary data in cache`);
+      return;
+    }
+
+    const buf = data instanceof ArrayBuffer ? data : data.buffer;
+    const bytes = new Uint8Array(buf);
+    log(`📤 Serving seg${chunkId} to peer (${(bytes.byteLength / 1024).toFixed(0)}KB)`);
+
+    // Send header
+    dc.send(JSON.stringify({ type: 'chunk_header', chunkId, totalSize: bytes.byteLength }));
+
+    // Send in DC_CHUNK_SIZE slices
+    for (let i = 0; i < bytes.byteLength; i += DC_CHUNK_SIZE) {
+      const slice = bytes.slice(i, Math.min(i + DC_CHUNK_SIZE, bytes.byteLength));
+      dc.send(slice.buffer);
+    }
+
+    // Send complete marker
+    dc.send(JSON.stringify({ type: 'chunk_complete', chunkId }));
+  }
+
+  _concat(chunks, totalSize) {
+    const result = new Uint8Array(totalSize);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return result.buffer;
+  }
+
+  // Query a peer: "do you have chunk X?" — 100ms timeout
+  haveChunk(webrtcId, chunkId) {
+    const conn = this.connections.get(webrtcId);
+    if (!conn || !conn.dc || conn.dc.readyState !== 'open') return Promise.resolve(false);
+
+    return new Promise((resolve) => {
+      const key = 'have_' + chunkId;
+      const timer = setTimeout(() => { conn.pendingRequests.delete(key); resolve(false); }, P2P_HAVE_TIMEOUT);
+      conn.pendingRequests.set(key, { resolve, timer });
+      conn.dc.send(JSON.stringify({ type: 'have_chunk', chunkId }));
+    });
+  }
+
+  // Request a chunk from peer — 2s timeout
+  requestChunk(webrtcId, chunkId) {
+    const conn = this.connections.get(webrtcId);
+    if (!conn || !conn.dc || conn.dc.readyState !== 'open') return Promise.resolve(null);
+
+    conn.lastUsed = Date.now();
+    return new Promise((resolve) => {
+      const key = 'chunk_' + chunkId;
+      const timer = setTimeout(() => { conn.pendingRequests.delete(key); conn.reassembly.delete(chunkId); resolve(null); }, P2P_CHUNK_TIMEOUT);
+      conn.pendingRequests.set(key, { resolve, timer });
+      conn.dc.send(JSON.stringify({ type: 'chunk_request', chunkId }));
+    });
+  }
+
+  async _handleOffer(msg) {
+    try {
+      // Clean up any existing connection to this peer
+      if (this.connections.has(msg.from)) this._cleanup(msg.from);
+
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+      const conn = { pc, dc: null, lastUsed: Date.now(), pendingRequests: new Map(), ready: false, reassembly: new Map() };
+      this.connections.set(msg.from, conn);
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          this.signaling.send({ type: 'ice-candidate', target: msg.from, payload: e.candidate });
+        }
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') this._cleanup(msg.from);
+      };
+
+      // Wait for incoming DataChannel
+      pc.ondatachannel = (evt) => {
+        const dc = evt.channel;
+        dc.binaryType = 'arraybuffer';
+        conn.dc = dc;
+        this._setupDC(dc, msg.from, conn);
+        dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel open (incoming from ${msg.from.slice(0, 8)})`); };
+      };
+
+      // Set remote offer, create and send answer
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      this.signaling.send({ type: 'answer', target: msg.from, payload: pc.localDescription });
+      log(`📨 Answered WebRTC offer from ${msg.from.slice(0, 8)}`);
+    } catch (e) {
+      log(`⚠ Failed to handle offer: ${e.message}`);
+    }
+  }
+
+  async _handleAnswer(msg) {
+    const conn = this.connections.get(msg.from);
+    if (conn && conn.pc) {
+      try {
+        await conn.pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+      } catch (e) {
+        console.warn('[P2P] Failed to handle answer:', e);
+      }
+    }
+  }
+
+  _handleICE(msg) {
+    const conn = this.connections.get(msg.from);
+    if (conn && conn.pc) {
+      conn.pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(() => {});
+    }
+  }
+
+  _cleanup(webrtcId) {
+    const conn = this.connections.get(webrtcId);
+    if (conn) {
+      if (conn.dc) try { conn.dc.close(); } catch {}
+      if (conn.pc) try { conn.pc.close(); } catch {}
+      // Reject all pending
+      for (const [, req] of conn.pendingRequests) {
+        clearTimeout(req.timer);
+        req.resolve(null);
+      }
+      this.connections.delete(webrtcId);
+    }
+  }
+
+  _cleanIdle() {
+    const now = Date.now();
+    for (const [id, conn] of this.connections) {
+      if (now - conn.lastUsed > CONN_IDLE_TIMEOUT) {
+        this._cleanup(id);
+      }
+    }
+  }
+
+  destroy() {
+    for (const [id] of this.connections) this._cleanup(id);
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  P2P STATS
+// ═══════════════════════════════════════════════
+const p2pStats = { peerHits: 0, serverHits: 0, peerFailures: 0, lastSource: '—' };
+
+function updateP2PStats() {
+  const total = p2pStats.peerHits + p2pStats.serverHits;
+  const pct = total > 0 ? Math.round((p2pStats.peerHits / total) * 100) : 0;
+  const statP2P = document.getElementById('statP2P');
+  const statSource = document.getElementById('statSource');
+  if (statP2P) statP2P.textContent = pct + '%';
+  if (statSource) statSource.textContent = p2pStats.lastSource;
+}
+
+// ═══════════════════════════════════════════════
+//  DOM ELEMENTS
+// ═══════════════════════════════════════════════
+const libraryView   = document.getElementById('libraryView');
+const playerView    = document.getElementById('playerView');
+const videoGrid     = document.getElementById('videoGrid');
+const backBtn       = document.getElementById('backBtn');
+const headerSubtitle= document.getElementById('headerSubtitle');
+const nowPlayingTitle = document.getElementById('nowPlayingTitle');
+const video         = document.getElementById('videoPlayer');
+const overlay       = document.getElementById('overlay');
+const overlayText   = document.getElementById('overlayText');
+const statusDot     = document.getElementById('statusDot');
+const statusText    = document.getElementById('statusText');
+const lanIPEl       = document.getElementById('lanIP');
+const lanURLEl      = document.getElementById('lanURL');
+const copyToast     = document.getElementById('copyToast');
+const logBody       = document.getElementById('logBody');
+
+const statResolution = document.getElementById('statResolution');
+const statBitrate    = document.getElementById('statBitrate');
+const statBuffer     = document.getElementById('statBuffer');
+const statSegments   = document.getElementById('statSegments');
+const statCached     = document.getElementById('statCached');
+const statEvicted    = document.getElementById('statEvicted');
+const cacheVis       = document.getElementById('cacheVis');
+const cacheParams    = document.getElementById('cacheParams');
+
+let hls = null;
+let chunkCache = null;
+let currentVideoName = null;
+let segmentCount = 0;
+let statsInterval = null;
+let inventoryInterval = null;
+
+// P2P globals
+let signaling = null;
+let peerManager = null;
+
+// ═══════════════════════════════════════════════
+//  UTILITIES
+// ═══════════════════════════════════════════════
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  const e = document.createElement('div');
+  e.className = 'log-entry';
+  e.innerHTML = `<span class="log-time">${t}</span> ${msg}`;
+  logBody.appendChild(e);
+  logBody.scrollTop = logBody.scrollHeight;
+}
+
+function setStatus(state, text) {
+  statusDot.className = 'status-dot ' + state;
+  statusText.textContent = text;
+}
+
+// ═══════════════════════════════════════════════
+//  SERVER INFO
+// ═══════════════════════════════════════════════
+async function fetchServerInfo() {
+  try {
+    const res = await fetch('/api/info');
+    const info = await res.json();
+    lanIPEl.textContent = info.ip;
+    lanURLEl.textContent = info.playerUrl;
+  } catch {
+    lanIPEl.textContent = location.hostname;
+    lanURLEl.textContent = location.origin;
+  }
+}
+fetchServerInfo();
+
+lanURLEl.addEventListener('click', () => {
+  navigator.clipboard.writeText(lanURLEl.textContent).then(() => {
+    copyToast.classList.add('show');
+    setTimeout(() => copyToast.classList.remove('show'), 1500);
+  });
+});
+
+// ═══════════════════════════════════════════════
+//  LIBRARY
+// ═══════════════════════════════════════════════
+async function loadLibrary() {
+  try {
+    const res = await fetch('/api/videos');
+    const { videos } = await res.json();
+
+    if (videos.length === 0) {
+      videoGrid.innerHTML = `
+        <div class="empty-library" style="grid-column:1/-1">
+          <h2>No videos yet</h2>
+          <p>Convert a video to start streaming:</p>
+          <code>python3 hls_convertor.py video.mp4</code>
+        </div>`;
+      setStatus('', 'No videos');
+      return;
+    }
+
+    videoGrid.innerHTML = videos.map(v => `
+      <div class="video-card" data-name="${v.name}" data-playlist="${v.playlist}" data-title="${v.title}">
+        ${v.thumbnail
+          ? `<img class="card-thumb" src="${v.thumbnail}" alt="${v.title}" loading="lazy" />`
+          : `<div class="card-thumb-placeholder">🎬</div>`
+        }
+        <div class="card-body">
+          <div class="card-title">${v.title}</div>
+          <div class="card-meta">${v.chunks} chunks</div>
+        </div>
+      </div>
+    `).join('');
+
+    videoGrid.querySelectorAll('.video-card').forEach(card => {
+      card.addEventListener('click', () => {
+        openPlayer(card.dataset.name, card.dataset.playlist, card.dataset.title);
+      });
+    });
+
+    setStatus('live', `${videos.length} video(s)`);
+  } catch (err) {
+    videoGrid.innerHTML = `<div class="empty-library" style="grid-column:1/-1"><h2>Failed to load library</h2><p>${err.message}</p></div>`;
+    setStatus('error', 'Error');
+  }
+}
+
+// ═══════════════════════════════════════════════
+//  PLAYER
+// ═══════════════════════════════════════════════
+function openPlayer(name, playlist, title) {
+  currentVideoName = name;
+  libraryView.style.display = 'none';
+  playerView.style.display = 'block';
+  headerSubtitle.textContent = 'Player';
+  nowPlayingTitle.textContent = title;
+  overlay.classList.remove('hidden');
+  overlayText.textContent = 'Loading stream…';
+  logBody.innerHTML = '';
+  segmentCount = 0;
+  p2pStats.peerHits = 0;
+  p2pStats.serverHits = 0;
+  p2pStats.peerFailures = 0;
+  p2pStats.lastSource = '—';
+
+  chunkCache = new ChunkCache(CACHE_T, CACHE_T_PRIME);
+  cacheParams.textContent = `t=${CACHE_T} behind / t'=${CACHE_T_PRIME} ahead`;
+
+  // Update peerManager's cache reference
+  if (peerManager) peerManager.cache = chunkCache;
+
+  fetch('/api/peers/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ peerId: PEER_ID, videoName: name, username: USERNAME, webrtcId: WEBRTC_ID }),
+  }).catch(() => {});
+
+  startHls(playlist);
+}
+
+function closePlayer() {
+  if (hls) { hls.destroy(); hls = null; }
+  video.src = '';
+  if (statsInterval) clearInterval(statsInterval);
+  if (inventoryInterval) clearInterval(inventoryInterval);
+
+  fetch('/api/peers/unregister', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ peerId: PEER_ID }),
+  }).catch(() => {});
+
+  playerView.style.display = 'none';
+  libraryView.style.display = 'block';
+  headerSubtitle.textContent = 'Library';
+  currentVideoName = null;
+  chunkCache = null;
+}
+
+backBtn.addEventListener('click', closePlayer);
+
+// ═══════════════════════════════════════════════
+//  P2P CHUNK FETCH LOGIC
+//
+//  Flow: local cache → ask server for peers →
+//        try each peer via WebRTC → fallback HTTP
+// ═══════════════════════════════════════════════
+async function fetchChunkP2P(segIndex, videoName) {
+  // 1. Check local cache
+  if (chunkCache && chunkCache.has(segIndex)) {
+    return { data: chunkCache.getData(segIndex), source: 'cache' };
+  }
+
+  if (!peerManager || !signaling || !signaling.connected) return null;
+
+  // 2. Ask server for peers that have this chunk
+  try {
+    log(`🔍 Peer request initiated for seg${segIndex}`);
+    const res = await fetch('/api/peers/list', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ videoId: videoName, chunkId: segIndex, requesterId: PEER_ID }),
+    });
+    const { peers: peerList } = await res.json();
+
+    if (peerList.length === 0) return null;
+
+    // 3. Try each peer in order
+    for (const peer of peerList) {
+      try {
+        const startTime = Date.now();
+        // Get or create connection
+        const conn = await peerManager.getConnection(peer.webrtcId);
+
+        // Have-check (100ms timeout)
+        const has = await peerManager.haveChunk(peer.webrtcId, segIndex);
+        if (!has) {
+          log(`⏭ ${peer.username} doesn't have seg${segIndex}`);
+          continue;
+        }
+
+        // Request chunk
+        const data = await peerManager.requestChunk(peer.webrtcId, segIndex);
+        if (data) {
+          const elapsed = Date.now() - startTime;
+          log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms)`);
+          return { data, source: 'p2p', peerName: peer.username };
+        }
+      } catch (e) {
+        log(`⚠ Peer ${peer.username} failed: ${e.message}`);
+      }
+    }
+
+    log(`⏳ All peers failed for seg${segIndex} → fallback`);
+  } catch (e) {
+    // Network error querying peer list — fall through to null
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════
+//  HLS STREAMING (with P2P custom loader)
+//
+//  We override the default HLS.js fragment loader
+//  to intercept .ts segment fetches:
+//    1. Try P2P (fetchChunkP2P)
+//    2. Fallback to standard HTTP fetch
+// ═══════════════════════════════════════════════
+function startHls(playlist) {
+  if (!Hls.isSupported()) {
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = playlist;
+      video.addEventListener('loadedmetadata', () => {
+        overlay.classList.add('hidden');
+        setStatus('live', 'Streaming');
+        video.play();
+      });
+      return;
+    }
+    overlayText.textContent = 'HLS not supported';
+    setStatus('error', 'Unsupported');
+    return;
+  }
+
+  // ── Constrain HLS.js to only buffer t' chunks ahead ──
+  const maxBufSec = CACHE_T_PRIME * CHUNK_DURATION;
+  log(`HLS.js init — maxBuffer: ${maxBufSec}s (${CACHE_T_PRIME} chunks × ${CHUNK_DURATION}s)`);
+
+  // ── Custom fragment loader with P2P ──
+  class P2PLoader extends Hls.DefaultConfig.loader {
+    constructor(config) {
+      super(config);
+      this._isSegment = false;
+      this._segIndex = null;
+    }
+
+    load(context, config, callbacks) {
+      const url = context.url || '';
+      const isTsSegment = url.endsWith('.ts');
+      this._isSegment = isTsSegment;
+
+      if (isTsSegment && context.frag && typeof context.frag.sn === 'number') {
+        this._segIndex = context.frag.sn;
+
+        // Try P2P first
+        const segIdx = this._segIndex;
+        fetchChunkP2P(segIdx, currentVideoName).then((result) => {
+          if (result && result.data && result.data instanceof ArrayBuffer && result.data.byteLength > 0) {
+            // P2P success — construct HLS.js-compatible response
+            p2pStats.peerHits++;
+            p2pStats.lastSource = result.peerName ? `P2P: ${result.peerName}` : 'P2P';
+            updateP2PStats();
+
+            // Store binary data in cache for re-sharing
+            if (chunkCache) chunkCache.store(segIdx, result.data, 'p2p');
+
+            const now = performance.now();
+            const response = { url: context.url, data: result.data };
+            const stats = {
+              trequest: now,
+              tfirst: now,
+              tload: now,
+              loaded: result.data.byteLength,
+              total: result.data.byteLength,
+            };
+            callbacks.onSuccess(response, stats, context, null);
+          } else {
+            // P2P failed or no data — fall back to HTTP
+            p2pStats.serverHits++;
+            p2pStats.lastSource = 'Server (HTTP)';
+            if (result === null) p2pStats.peerFailures++;
+            updateP2PStats();
+            log(`📡 seg${segIdx}: P2P miss → HTTP fallback`);
+
+            // Wrap callbacks to capture binary data from HTTP response
+            const wrappedCallbacks = {
+              onSuccess: (response, stats, ctx, net) => {
+                if (chunkCache && response.data) {
+                  chunkCache.store(segIdx, response.data, 'server');
+                }
+                callbacks.onSuccess(response, stats, ctx, net);
+              },
+              onError: callbacks.onError,
+              onTimeout: callbacks.onTimeout,
+              onAbort: callbacks.onAbort,
+              onProgress: callbacks.onProgress,
+            };
+            super.load(context, config, wrappedCallbacks);
+          }
+        }).catch((err) => {
+          log(`⚠ P2P loader error: ${err.message} → HTTP fallback`);
+          p2pStats.serverHits++;
+          p2pStats.lastSource = 'Server (HTTP)';
+          updateP2PStats();
+          // Wrap to capture data
+          const wrappedCallbacks = {
+            onSuccess: (response, stats, ctx, net) => {
+              if (chunkCache && response.data) {
+                chunkCache.store(segIdx, response.data, 'server');
+              }
+              callbacks.onSuccess(response, stats, ctx, net);
+            },
+            onError: callbacks.onError,
+            onTimeout: callbacks.onTimeout,
+            onAbort: callbacks.onAbort,
+            onProgress: callbacks.onProgress,
+          };
+          super.load(context, config, wrappedCallbacks);
+        });
+      } else {
+        // Not a .ts segment (e.g., .m3u8) — always use HTTP
+        super.load(context, config, callbacks);
+      }
+    }
+  }
+
+  hls = new Hls({
+    debug: false,
+    enableWorker: true,
+    lowLatencyMode: false,
+    maxBufferLength: maxBufSec,
+    maxMaxBufferLength: maxBufSec + CHUNK_DURATION,
+    maxBufferSize: 60 * 1000 * 1000,
+    maxBufferHole: 0.5,
+    loader: P2PLoader,
+  });
+
+  hls.loadSource(playlist);
+  hls.attachMedia(video);
+
+  hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+    const totalSegs = hls.levels[0]?.details?.fragments?.length || 0;
+    chunkCache.totalSegments = totalSegs;
+    log(`Manifest: ${totalSegs} segments, ${data.levels.length} level(s)`);
+    overlay.classList.add('hidden');
+    setStatus('live', 'Streaming');
+    video.play().catch(() => {});
+    renderCacheVis();
+  });
+
+  // ── Chunk downloaded (from server OR P2P) ──
+  hls.on(Hls.Events.FRAG_LOADED, (_, data) => {
+    const sn = data.frag.sn;
+    if (typeof sn === 'number') {
+      segmentCount++;
+      // The store may have already been called by P2PLoader,
+      // but store() is idempotent for the same segIndex.
+      if (!chunkCache.has(sn)) {
+        chunkCache.store(sn, data.frag.data || null, 'server');
+      }
+      statSegments.textContent = segmentCount;
+
+      const src = chunkCache.isP2P(sn) ? '🌐 P2P' : '📡 HTTP';
+      log(`📥 seg${sn} loaded (${src}) → cached [${chunkCache.getInventory().join(',')}]`);
+      renderCacheVis();
+
+      const level = hls.levels[hls.currentLevel];
+      if (level) {
+        statBitrate.textContent = `${(level.bitrate / 1000).toFixed(0)} kbps`;
+      }
+    }
+  });
+
+  // ── Playback moved to a new chunk ──
+  hls.on(Hls.Events.FRAG_CHANGED, (_, data) => {
+    const sn = data.frag.sn;
+    if (typeof sn === 'number') {
+      chunkCache.setCurrentSegment(sn);
+      const win = chunkCache.getWindow();
+      log(`▶ Playing seg${sn} — window: [${win.lo}…${win.hi}], cached: [${chunkCache.getInventory().join(',')}]`);
+      renderCacheVis();
+    }
+  });
+
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    log(`⚠ ${data.type}: ${data.details}`);
+    if (data.fatal) {
+      setStatus('error', 'Error');
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+    }
+  });
+
+  // Stats
+  statsInterval = setInterval(() => {
+    if (video.videoWidth) statResolution.textContent = `${video.videoWidth}×${video.videoHeight}`;
+    if (video.buffered.length > 0) {
+      const buf = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+      statBuffer.textContent = `${buf.toFixed(1)}s`;
+    }
+    if (chunkCache) {
+      statCached.textContent = chunkCache.cache.size;
+      statEvicted.textContent = chunkCache.evictionCount;
+    }
+    updateP2PStats();
+  }, 1000);
+
+  // Report inventory to server (P2P)
+  inventoryInterval = setInterval(() => {
+    if (chunkCache && currentVideoName) {
+      fetch('/api/peers/update-cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ peerId: PEER_ID, chunks: chunkCache.getInventory() }),
+      }).catch(() => {});
+    }
+  }, INVENTORY_INTERVAL);
+}
+
+// ═══════════════════════════════════════════════
+//  CACHE VISUALIZER
+// ═══════════════════════════════════════════════
+function renderCacheVis() {
+  if (!chunkCache || chunkCache.totalSegments === 0) return;
+
+  const total = chunkCache.totalSegments;
+  const win = chunkCache.getWindow();
+  let html = '';
+
+  for (let i = 0; i < total; i++) {
+    let cls = 'empty';
+    if (i === win.current) cls = 'playing';
+    else if (chunkCache.has(i) && chunkCache.isP2P(i)) cls = 'p2p';
+    else if (chunkCache.has(i)) cls = 'cached';
+    else if (chunkCache.evictedSet.has(i)) cls = 'evicted';
+    html += `<div class="chunk-block ${cls}" title="seg${String(i).padStart(3,'0')}.ts">${i}</div>`;
+  }
+
+  cacheVis.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════
+//  USERNAME MODAL
+// ═══════════════════════════════════════════════
+function initUsernameModal() {
+  const modal = document.getElementById('usernameModal');
+  const input = document.getElementById('usernameInput');
+  const btn = document.getElementById('usernameSubmit');
+
+  if (USERNAME) {
+    modal.classList.add('hidden');
+    return;
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') btn.click();
+  });
+
+  btn.addEventListener('click', () => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    USERNAME = name;
+    sessionStorage.setItem('streambox_username', USERNAME);
+    modal.classList.add('hidden');
+  });
+
+  input.focus();
+}
+
+// ═══════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════
+initUsernameModal();
+
+// Start WebSocket signaling
+signaling = new SignalingClient();
+signaling.connect();
+
+// Start peer connection manager
+peerManager = new PeerConnectionManager(signaling, null); // cache set later when player opens
+
+loadLibrary();
+</script>
+</body>
+</html>
