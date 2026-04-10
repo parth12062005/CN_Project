@@ -474,8 +474,8 @@ const CHUNK_DURATION = 4;  // seconds per chunk (must match ffmpeg -hls_time)
 const PEER_ID = 'peer_' + Math.random().toString(36).slice(2, 10);
 const WEBRTC_ID = 'wrtc_' + Math.random().toString(36).slice(2, 10);
 const INVENTORY_INTERVAL = 5000;
-const P2P_HAVE_TIMEOUT  = 100;   // ms to wait for have_chunk response
-const P2P_CHUNK_TIMEOUT = 2000;  // ms to wait for chunk data
+const P2P_HAVE_TIMEOUT  = 200;   // ms to wait for have_chunk response
+const P2P_CHUNK_TIMEOUT = 5000;  // ms to wait for chunk data (increased to 5s)
 const CONN_IDLE_TIMEOUT = 30000; // ms before closing idle peer connections
 const DC_CHUNK_SIZE = 16384;     // 16KB DataChannel send slices
 
@@ -504,8 +504,13 @@ class ChunkCache {
     if (this.currentSegment >= 0) {
       const lo = this.currentSegment - this.t;
       const hi = this.currentSegment + this.tPrime;
-      if (segIndex < lo || segIndex > hi) return false;
+      if (segIndex < lo || segIndex > hi) {
+        log(`🗃️ Cache REJECT seg${segIndex} — outside window [${lo}…${hi}]`);
+        return false;
+      }
     }
+    const dataSize = data ? (data.byteLength || data.length || '?') : 'null';
+    log(`🗃️ Cache STORE seg${segIndex} — source=${source}, dataSize=${dataSize}, type=${data ? data.constructor?.name : 'null'}`);
     this.cache.set(segIndex, { data, timestamp: Date.now(), source });
     this.evictedSet.delete(segIndex);
     if (source === 'p2p') this.p2pSet.add(segIndex);
@@ -536,6 +541,9 @@ class ChunkCache {
     const toEvict = [];
     for (const [idx] of this.cache) {
       if (idx < lo || idx > hi) toEvict.push(idx);
+    }
+    if (toEvict.length > 0) {
+      log(`🗑️ Cache EVICT [${toEvict.join(',')}] — window now [${lo}…${hi}]`);
     }
     for (const idx of toEvict) {
       this.cache.delete(idx);
@@ -572,35 +580,43 @@ class SignalingClient {
   connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = `${proto}://${location.host}`;
+    log(`🔌 WebSocket connecting to ${url}...`);
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
       this.connected = true;
       this.ws.send(JSON.stringify({ type: 'join', webrtcId: WEBRTC_ID }));
-      log('🔌 WebSocket connected');
+      log(`🔌 WebSocket CONNECTED — sent join as ${WEBRTC_ID}`);
     };
 
     this.ws.onmessage = (evt) => {
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
+      log(`🔌 WS ← ${msg.type} from=${msg.from || '?'}`);
       const handler = this.handlers[msg.type];
       if (handler) handler(msg);
+      else log(`🔌 WS: no handler for type '${msg.type}'`);
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (evt) => {
       this.connected = false;
-      log('🔌 WebSocket disconnected — reconnecting in 3s');
+      log(`🔌 WebSocket CLOSED (code=${evt.code}, reason=${evt.reason || 'none'}) — reconnecting in 3s`);
       setTimeout(() => this.connect(), 3000);
     };
 
-    this.ws.onerror = () => {};
+    this.ws.onerror = (err) => {
+      log(`🔌 WebSocket ERROR: ${err.message || 'unknown'}`);
+    };
   }
 
   on(type, cb) { this.handlers[type] = cb; }
 
   send(msg) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      log(`🔌 WS → ${msg.type} target=${msg.target || '?'}`);
       this.ws.send(JSON.stringify(msg));
+    } else {
+      log(`🔌 WS SEND FAILED (readyState=${this.ws?.readyState}) — ${msg.type}`);
     }
   }
 }
@@ -631,16 +647,22 @@ class PeerConnectionManager {
   // Get or create a connection to a peer
   async getConnection(webrtcId) {
     const existing = this.connections.get(webrtcId);
-    if (existing && existing.ready && existing.dc && existing.dc.readyState === 'open') {
-      existing.lastUsed = Date.now();
-      return existing;
+    if (existing) {
+      log(`🔗 getConnection(${webrtcId.slice(0, 8)}): existing found — ready=${existing.ready}, dc=${existing.dc?.readyState || 'null'}`);
+      if (existing.ready && existing.dc && existing.dc.readyState === 'open') {
+        existing.lastUsed = Date.now();
+        return existing;
+      }
+    } else {
+      log(`🔗 getConnection(${webrtcId.slice(0, 8)}): no existing connection`);
     }
 
-    log(`🔗 Opening WebRTC connection to ${webrtcId.slice(0, 8)}…`);
+    log(`🔗 Creating NEW WebRTC connection to ${webrtcId.slice(0, 8)} (initiator=true)…`);
     return this._createConnection(webrtcId, true);
   }
 
   async _createConnection(webrtcId, isInitiator) {
+    log(`🔗 _createConnection(${webrtcId.slice(0, 8)}, initiator=${isInitiator})`);
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
@@ -657,24 +679,36 @@ class PeerConnectionManager {
     this.connections.set(webrtcId, conn);
 
     // ICE candidates
+    let iceCount = 0;
     pc.onicecandidate = (e) => {
       if (e.candidate) {
+        iceCount++;
+        if (iceCount <= 3) log(`🧊 ICE candidate #${iceCount} → ${e.candidate.type} ${e.candidate.protocol} ${e.candidate.address}:${e.candidate.port}`);
         this.signaling.send({
           type: 'ice-candidate',
           target: webrtcId,
           payload: e.candidate,
         });
+      } else {
+        log(`🧊 ICE gathering complete (${iceCount} candidates)`);
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      log(`🧊 ICE connection state: ${pc.iceConnectionState}`);
+    };
+
     pc.onconnectionstatechange = () => {
+      log(`🔗 Connection state: ${pc.connectionState}`);
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        log(`🔗 Connection ${pc.connectionState} — cleaning up ${webrtcId.slice(0, 8)}`);
         this._cleanup(webrtcId);
       }
     };
 
     if (isInitiator) {
       // Create DataChannel
+      log(`🔗 Creating DataChannel 'chunks' (ordered)...`);
       const dc = pc.createDataChannel('chunks', { ordered: true });
       dc.binaryType = 'arraybuffer';
       conn.dc = dc;
@@ -683,6 +717,7 @@ class PeerConnectionManager {
       // Create offer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      log(`🔗 SDP offer created & sent to ${webrtcId.slice(0, 8)}`);
       this.signaling.send({
         type: 'offer',
         target: webrtcId,
@@ -690,26 +725,30 @@ class PeerConnectionManager {
       });
 
       // Wait for DC to open
+      log(`🔗 Waiting for DataChannel to open...`);
       await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('DC open timeout')), 5000);
-        dc.onopen = () => { clearTimeout(timeout); conn.ready = true; log(`🤝 DataChannel open (outgoing to ${webrtcId.slice(0, 8)})`); resolve(); };
-        dc.onerror = () => { clearTimeout(timeout); reject(new Error('DC error')); };
+        const timeout = setTimeout(() => { log(`❌ DC open TIMEOUT (5s) for ${webrtcId.slice(0, 8)}`); reject(new Error('DC open timeout')); }, 5000);
+        dc.onopen = () => { clearTimeout(timeout); conn.ready = true; log(`🤝 DataChannel OPEN (outgoing to ${webrtcId.slice(0, 8)}) readyState=${dc.readyState}`); resolve(); };
+        dc.onerror = (e) => { clearTimeout(timeout); log(`❌ DC error: ${e.error?.message || 'unknown'}`); reject(new Error('DC error')); };
       });
     } else {
       // Wait for incoming DataChannel
+      log(`🔗 Waiting for incoming DataChannel from ${webrtcId.slice(0, 8)}...`);
       await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('DC incoming timeout')), 5000);
+        const timeout = setTimeout(() => { log(`❌ DC incoming TIMEOUT (5s)`); reject(new Error('DC incoming timeout')); }, 5000);
         pc.ondatachannel = (evt) => {
           clearTimeout(timeout);
           const dc = evt.channel;
+          log(`🔗 Incoming DataChannel received: label=${dc.label}, readyState=${dc.readyState}`);
           dc.binaryType = 'arraybuffer';
           conn.dc = dc;
           this._setupDC(dc, webrtcId, conn);
-          dc.onopen = () => { conn.ready = true; resolve(); };
+          dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel OPEN (incoming from ${webrtcId.slice(0, 8)})`); resolve(); };
         };
       });
     }
 
+    log(`🔗 Connection to ${webrtcId.slice(0, 8)} fully established`);
     return conn;
   }
 
@@ -723,19 +762,25 @@ class PeerConnectionManager {
         if (msg.type === 'have_chunk') {
           // Peer is asking if we have a chunk
           const have = this.cache ? this.cache.has(msg.chunkId) : false;
+          const dataType = this.cache ? (this.cache.getData(msg.chunkId) ? typeof this.cache.getData(msg.chunkId) : 'null') : 'no-cache';
+          log(`📋 have_chunk query for seg${msg.chunkId} → ${have} (dataType=${dataType})`);
           dc.send(JSON.stringify({
             type: 'have_chunk_response',
             chunkId: msg.chunkId,
             have,
           }));
         } else if (msg.type === 'have_chunk_response') {
+          log(`📋 have_chunk_response for seg${msg.chunkId} → ${msg.have}`);
           const req = conn.pendingRequests.get('have_' + msg.chunkId);
           if (req) { clearTimeout(req.timer); req.resolve(msg.have); conn.pendingRequests.delete('have_' + msg.chunkId); }
+          else { log(`⚠️ No pending request found for have_${msg.chunkId}`); }
         } else if (msg.type === 'chunk_request') {
           // Peer wants a chunk — send it
+          log(`📬 Received chunk_request for seg${msg.chunkId} — calling _serveChunk...`);
           this._serveChunk(dc, msg.chunkId);
         } else if (msg.type === 'chunk_header') {
           // Start reassembly
+          log(`📦 chunk_header received for seg${msg.chunkId} — totalSize=${msg.totalSize} bytes (${(msg.totalSize/1024).toFixed(0)}KB)`);
           conn.reassembly.set(msg.chunkId, {
             totalSize: msg.totalSize,
             received: [],
@@ -745,38 +790,61 @@ class PeerConnectionManager {
           // Finalize reassembly
           const ra = conn.reassembly.get(msg.chunkId);
           if (ra) {
-            const fullBuf = this._concat(ra.received, ra.totalSize);
-            conn.reassembly.delete(msg.chunkId);
-            const req = conn.pendingRequests.get('chunk_' + msg.chunkId);
-            if (req) { clearTimeout(req.timer); req.resolve(fullBuf); conn.pendingRequests.delete('chunk_' + msg.chunkId); }
+            try {
+              log(`📦 Finalizing reassembly for seg${msg.chunkId} (${ra.receivedBytes}/${ra.totalSize} bytes)...`);
+              const fullBuf = this._concat(ra.received, ra.totalSize);
+              conn.reassembly.delete(msg.chunkId);
+              const req = conn.pendingRequests.get('chunk_' + msg.chunkId);
+              if (req) { clearTimeout(req.timer); req.resolve(fullBuf); conn.pendingRequests.delete('chunk_' + msg.chunkId); }
+            } catch (err) {
+              log(`❌ Reassembly crash for seg${msg.chunkId}: ${err.message}`);
+            }
+          } else {
+             log(`❌ Received chunk_complete but no reassembly state for seg${msg.chunkId}`);
           }
         } else if (msg.type === 'chunk_not_found') {
+          log(`🚫 chunk_not_found received for seg${msg.chunkId}`);
           const req = conn.pendingRequests.get('chunk_' + msg.chunkId);
           if (req) { clearTimeout(req.timer); req.resolve(null); conn.pendingRequests.delete('chunk_' + msg.chunkId); }
+        } else {
+          log(`⚠️ Unknown DC message type: ${msg.type}`);
         }
       } else {
         // Binary data — part of a chunk transfer (reassembly)
-        // We need to figure out which chunkId this belongs to.
-        // Since we use ordered DC, it belongs to the most recent reassembly.
-        for (const [, ra] of conn.reassembly) {
+        let found = false;
+        for (const [id, ra] of conn.reassembly) {
           ra.received.push(new Uint8Array(evt.data));
           ra.receivedBytes += evt.data.byteLength;
+          if (ra.received.length === 1) {
+            log(`📡 Receiving first binary slice for seg${id}...`);
+          }
+          found = true;
           break; // ordered — only one active at a time
+        }
+        if (!found) {
+          log(`⚠️ Received binary data, but no active reassembly window!`);
         }
       }
     };
 
-    dc.onclose = () => this._cleanup(webrtcId);
-    dc.onerror = () => this._cleanup(webrtcId);
+    dc.onclose = () => { log(`🔗 DataChannel CLOSED for ${webrtcId.slice(0, 8)}`); this._cleanup(webrtcId); };
+    dc.onerror = (e) => { log(`❌ DataChannel ERROR for ${webrtcId.slice(0, 8)}: ${e.error?.message || 'unknown'}`); this._cleanup(webrtcId); };
   }
 
   async _serveChunk(dc, chunkId) {
-    if (!this.cache) { dc.send(JSON.stringify({ type: 'chunk_not_found', chunkId })); return; }
+    if (!this.cache) {
+      log(`🚫 _serveChunk(seg${chunkId}): NO CACHE object`);
+      dc.send(JSON.stringify({ type: 'chunk_not_found', chunkId }));
+      return;
+    }
     const data = this.cache.getData(chunkId);
+    const dataInfo = data ? `type=${data.constructor?.name}, size=${data.byteLength || data.length || '?'}` : 'NULL';
+    log(`🔬 _serveChunk(seg${chunkId}): data=${dataInfo}`);
+
     if (!data || data === true || !(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) {
       // No binary data available (only a marker) — can't serve
       dc.send(JSON.stringify({ type: 'chunk_not_found', chunkId }));
-      log(`🚫 Can't serve seg${chunkId} — no binary data in cache`);
+      log(`🚫 Can't serve seg${chunkId} — not an ArrayBuffer (got ${dataInfo})`);
       return;
     }
 
@@ -784,17 +852,56 @@ class PeerConnectionManager {
     const bytes = new Uint8Array(buf);
     log(`📤 Serving seg${chunkId} to peer (${(bytes.byteLength / 1024).toFixed(0)}KB)`);
 
-    // Send header
-    dc.send(JSON.stringify({ type: 'chunk_header', chunkId, totalSize: bytes.byteLength }));
+    try {
+      // Send header
+      dc.send(JSON.stringify({ type: 'chunk_header', chunkId, totalSize: bytes.byteLength }));
 
-    // Send in DC_CHUNK_SIZE slices
-    for (let i = 0; i < bytes.byteLength; i += DC_CHUNK_SIZE) {
-      const slice = bytes.slice(i, Math.min(i + DC_CHUNK_SIZE, bytes.byteLength));
-      dc.send(slice.buffer);
+      let offset = 0;
+      // Conservative 64KB threshold to avoid UDP/SCTP buffer bloat
+      dc.bufferedAmountLowThreshold = 65536; 
+
+      let slicesSent = 0;
+      let backpressureHits = 0;
+
+      const sendSlices = async () => {
+        try {
+          while (offset < bytes.byteLength) {
+            if (dc.readyState !== 'open') {
+              log(`❌ DC closed mid-send seg${chunkId} at offset ${offset}/${bytes.byteLength}`);
+              return;
+            }
+
+            if (dc.bufferedAmount > 65536) { // Max 64KB queued
+              backpressureHits++;
+              await new Promise(r => setTimeout(r, 10));
+              continue;
+            }
+
+            const end = Math.min(offset + DC_CHUNK_SIZE, bytes.byteLength);
+            dc.send(bytes.subarray(offset, end));
+            offset = end;
+            slicesSent++;
+
+            // Progress log every 25%
+            const pct = Math.floor((offset / bytes.byteLength) * 100);
+            if (pct % 25 === 0 && pct > 0 && slicesSent > 1) {
+              log(`📤 seg${chunkId} sending: ${pct}% (${slicesSent} slices, ${backpressureHits} waits, buffered=${dc.bufferedAmount})`);
+            }
+          }
+
+          // Complete
+          dc.send(JSON.stringify({ type: 'chunk_complete', chunkId }));
+          log(`📤 ✅ Finished sending seg${chunkId} — ${bytes.byteLength} bytes, ${slicesSent} slices, ${backpressureHits} backpressure waits`);
+        } catch (err) {
+          log(`❌ DataChannel send CRASH seg${chunkId} at offset ${offset}: ${err.message}`);
+        }
+      };
+
+      sendSlices();
+
+    } catch (err) {
+      log(`❌ DataChannel start send error seg${chunkId}: ${err.message}`);
     }
-
-    // Send complete marker
-    dc.send(JSON.stringify({ type: 'chunk_complete', chunkId }));
   }
 
   _concat(chunks, totalSize) {
@@ -807,28 +914,42 @@ class PeerConnectionManager {
     return result.buffer;
   }
 
-  // Query a peer: "do you have chunk X?" — 100ms timeout
+  // Query a peer: "do you have chunk X?"
   haveChunk(webrtcId, chunkId) {
     const conn = this.connections.get(webrtcId);
-    if (!conn || !conn.dc || conn.dc.readyState !== 'open') return Promise.resolve(false);
+    if (!conn || !conn.dc || conn.dc.readyState !== 'open') {
+      log(`📋 haveChunk(${webrtcId.slice(0, 8)}, seg${chunkId}): NO open DC — returning false`);
+      return Promise.resolve(false);
+    }
 
+    log(`📋 haveChunk → sending have_chunk query for seg${chunkId} to ${webrtcId.slice(0, 8)} (timeout=${P2P_HAVE_TIMEOUT}ms)`);
     return new Promise((resolve) => {
       const key = 'have_' + chunkId;
-      const timer = setTimeout(() => { conn.pendingRequests.delete(key); resolve(false); }, P2P_HAVE_TIMEOUT);
+      const timer = setTimeout(() => {
+        log(`📋 haveChunk TIMEOUT for seg${chunkId} from ${webrtcId.slice(0, 8)} (${P2P_HAVE_TIMEOUT}ms)`);
+        conn.pendingRequests.delete(key); resolve(false);
+      }, P2P_HAVE_TIMEOUT);
       conn.pendingRequests.set(key, { resolve, timer });
       conn.dc.send(JSON.stringify({ type: 'have_chunk', chunkId }));
     });
   }
 
-  // Request a chunk from peer — 2s timeout
+  // Request a chunk from peer
   requestChunk(webrtcId, chunkId) {
     const conn = this.connections.get(webrtcId);
-    if (!conn || !conn.dc || conn.dc.readyState !== 'open') return Promise.resolve(null);
+    if (!conn || !conn.dc || conn.dc.readyState !== 'open') {
+      log(`📥 requestChunk(${webrtcId.slice(0, 8)}, seg${chunkId}): NO open DC — returning null`);
+      return Promise.resolve(null);
+    }
 
+    log(`📥 requestChunk → sending chunk_request for seg${chunkId} to ${webrtcId.slice(0, 8)} (timeout=${P2P_CHUNK_TIMEOUT}ms)`);
     conn.lastUsed = Date.now();
     return new Promise((resolve) => {
       const key = 'chunk_' + chunkId;
-      const timer = setTimeout(() => { conn.pendingRequests.delete(key); conn.reassembly.delete(chunkId); resolve(null); }, P2P_CHUNK_TIMEOUT);
+      const timer = setTimeout(() => {
+        log(`📥 requestChunk TIMEOUT for seg${chunkId} from ${webrtcId.slice(0, 8)} (${P2P_CHUNK_TIMEOUT}ms) — reassembly had ${conn.reassembly.get(chunkId)?.receivedBytes || 0} bytes`);
+        conn.pendingRequests.delete(key); conn.reassembly.delete(chunkId); resolve(null);
+      }, P2P_CHUNK_TIMEOUT);
       conn.pendingRequests.set(key, { resolve, timer });
       conn.dc.send(JSON.stringify({ type: 'chunk_request', chunkId }));
     });
@@ -836,8 +957,12 @@ class PeerConnectionManager {
 
   async _handleOffer(msg) {
     try {
+      log(`📨 Received WebRTC OFFER from ${msg.from.slice(0, 8)}`);
       // Clean up any existing connection to this peer
-      if (this.connections.has(msg.from)) this._cleanup(msg.from);
+      if (this.connections.has(msg.from)) {
+        log(`📨 Cleaning up existing connection to ${msg.from.slice(0, 8)} before accepting offer`);
+        this._cleanup(msg.from);
+      }
 
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -845,22 +970,31 @@ class PeerConnectionManager {
       const conn = { pc, dc: null, lastUsed: Date.now(), pendingRequests: new Map(), ready: false, reassembly: new Map() };
       this.connections.set(msg.from, conn);
 
+      let iceCount = 0;
       pc.onicecandidate = (e) => {
         if (e.candidate) {
+          iceCount++;
           this.signaling.send({ type: 'ice-candidate', target: msg.from, payload: e.candidate });
+        } else {
+          log(`🧊 ICE gathering complete for incoming (${iceCount} candidates)`);
         }
       };
+      pc.oniceconnectionstatechange = () => {
+        log(`🧊 ICE state (incoming from ${msg.from.slice(0, 8)}): ${pc.iceConnectionState}`);
+      };
       pc.onconnectionstatechange = () => {
+        log(`🔗 Conn state (incoming from ${msg.from.slice(0, 8)}): ${pc.connectionState}`);
         if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') this._cleanup(msg.from);
       };
 
       // Wait for incoming DataChannel
       pc.ondatachannel = (evt) => {
         const dc = evt.channel;
+        log(`📨 Incoming DataChannel label=${dc.label} readyState=${dc.readyState}`);
         dc.binaryType = 'arraybuffer';
         conn.dc = dc;
         this._setupDC(dc, msg.from, conn);
-        dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel open (incoming from ${msg.from.slice(0, 8)})`); };
+        dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel OPEN (incoming from ${msg.from.slice(0, 8)})`); };
       };
 
       // Set remote offer, create and send answer
@@ -868,37 +1002,46 @@ class PeerConnectionManager {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       this.signaling.send({ type: 'answer', target: msg.from, payload: pc.localDescription });
-      log(`📨 Answered WebRTC offer from ${msg.from.slice(0, 8)}`);
+      log(`📨 SDP ANSWER sent to ${msg.from.slice(0, 8)}`);
     } catch (e) {
-      log(`⚠ Failed to handle offer: ${e.message}`);
+      log(`⚠ Failed to handle offer from ${msg.from}: ${e.message}`);
     }
   }
 
   async _handleAnswer(msg) {
+    log(`📨 Received SDP ANSWER from ${msg.from.slice(0, 8)}`);
     const conn = this.connections.get(msg.from);
     if (conn && conn.pc) {
       try {
         await conn.pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+        log(`📨 Remote description set for ${msg.from.slice(0, 8)}`);
       } catch (e) {
-        console.warn('[P2P] Failed to handle answer:', e);
+        log(`⚠ Failed to set remote description from ${msg.from.slice(0, 8)}: ${e.message}`);
       }
+    } else {
+      log(`⚠ _handleAnswer: no connection found for ${msg.from.slice(0, 8)}`);
     }
   }
 
   _handleICE(msg) {
     const conn = this.connections.get(msg.from);
     if (conn && conn.pc) {
-      conn.pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(() => {});
+      conn.pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch((e) => {
+        log(`⚠ ICE candidate add failed from ${msg.from.slice(0, 8)}: ${e.message}`);
+      });
+    } else {
+      log(`⚠ _handleICE: no connection for ${msg.from.slice(0, 8)}`);
     }
   }
 
   _cleanup(webrtcId) {
     const conn = this.connections.get(webrtcId);
     if (conn) {
+      log(`🧹 Cleaning up connection to ${webrtcId.slice(0, 8)} — pending=${conn.pendingRequests.size}, reassembly=${conn.reassembly.size}`);
       if (conn.dc) try { conn.dc.close(); } catch {}
       if (conn.pc) try { conn.pc.close(); } catch {}
-      // Reject all pending
-      for (const [, req] of conn.pendingRequests) {
+      for (const [key, req] of conn.pendingRequests) {
+        log(`🧹 Rejecting pending request: ${key}`);
         clearTimeout(req.timer);
         req.resolve(null);
       }
@@ -1136,7 +1279,12 @@ async function fetchChunkP2P(segIndex, videoName) {
     });
     const { peers: peerList } = await res.json();
 
-    if (peerList.length === 0) return null;
+    if (peerList.length === 0) {
+      log(`⚠️ Server returned 0 peers for seg${segIndex}`);
+      return null;
+    }
+
+    log(`👥 Found ${peerList.length} peer(s) for seg${segIndex}`);
 
     // 3. Try each peer in order
     for (const peer of peerList) {
@@ -1148,16 +1296,19 @@ async function fetchChunkP2P(segIndex, videoName) {
         // Have-check (100ms timeout)
         const has = await peerManager.haveChunk(peer.webrtcId, segIndex);
         if (!has) {
-          log(`⏭ ${peer.username} doesn't have seg${segIndex}`);
+          log(`⏭ ${peer.username} doesn't have seg${segIndex} (haveChunk=false)`);
           continue;
         }
 
         // Request chunk
+        log(`📥 Requesting seg${segIndex} from ${peer.username}...`);
         const data = await peerManager.requestChunk(peer.webrtcId, segIndex);
         if (data) {
           const elapsed = Date.now() - startTime;
           log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms)`);
           return { data, source: 'p2p', peerName: peer.username };
+        } else {
+          log(`❌ requestChunk returned null for seg${segIndex} (timeout or not found)`);
         }
       } catch (e) {
         log(`⚠ Peer ${peer.username} failed: ${e.message}`);
@@ -1166,7 +1317,7 @@ async function fetchChunkP2P(segIndex, videoName) {
 
     log(`⏳ All peers failed for seg${segIndex} → fallback`);
   } catch (e) {
-    // Network error querying peer list — fall through to null
+    log(`❌ Peer list request failed: ${e.message}`);
   }
 
   return null;
@@ -1250,7 +1401,7 @@ function startHls(playlist) {
             const wrappedCallbacks = {
               onSuccess: (response, stats, ctx, net) => {
                 if (chunkCache && response.data) {
-                  chunkCache.store(segIdx, response.data, 'server');
+                  chunkCache.store(segIdx, response.data.slice(0), 'server');
                 }
                 callbacks.onSuccess(response, stats, ctx, net);
               },
@@ -1270,7 +1421,7 @@ function startHls(playlist) {
           const wrappedCallbacks = {
             onSuccess: (response, stats, ctx, net) => {
               if (chunkCache && response.data) {
-                chunkCache.store(segIdx, response.data, 'server');
+                chunkCache.store(segIdx, response.data.slice(0), 'server');
               }
               callbacks.onSuccess(response, stats, ctx, net);
             },
