@@ -161,7 +161,7 @@ function startHls(playlist) {
             p2pStats.lastSource = result.peerName ? `P2P: ${result.peerName}` : 'P2P';
             updateP2PStats();
 
-            if (chunkCache) chunkCache.store(segIdx, result.data, 'p2p');
+            if (chunkCache) chunkCache.store(segIdx, result.data.slice(0), 'p2p');
 
             const now = performance.now();
             const response = { url: context.url, data: result.data };
