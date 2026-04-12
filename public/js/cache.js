@@ -20,9 +20,8 @@ class ChunkCache {
   store(segIndex, data = null, source = 'server') {
     if (this.currentSegment >= 0) {
       const lo = this.currentSegment - this.t;
-      const hi = this.currentSegment + this.tPrime;
-      if (segIndex < lo || segIndex > hi) {
-        log(`🗃️ Cache REJECT seg${segIndex} — outside window [${lo}…${hi}]`);
+      if (segIndex < lo) {
+        log(`🗃️ Cache REJECT seg${segIndex} — too old (before ${lo})`);
         return false;
       }
     }
@@ -54,13 +53,12 @@ class ChunkCache {
   _evict() {
     if (this.currentSegment < 0) return;
     const lo = this.currentSegment - this.t;
-    const hi = this.currentSegment + this.tPrime;
     const toEvict = [];
     for (const [idx] of this.cache) {
-      if (idx < lo || idx > hi) toEvict.push(idx);
+      if (idx < lo) toEvict.push(idx);
     }
     if (toEvict.length > 0) {
-      log(`🗑️ Cache EVICT [${toEvict.join(',')}] — window now [${lo}…${hi}]`);
+      log(`🗑️ Cache EVICT [${toEvict.join(',')}] — fallen behind ${lo}`);
     }
     for (const idx of toEvict) {
       this.cache.delete(idx);
