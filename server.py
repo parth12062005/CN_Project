@@ -6,6 +6,7 @@ Python equivalent of server.js using Flask + flask-sock
 
 import os
 import json
+import random
 import time
 import socket
 import threading
@@ -120,11 +121,6 @@ LOCAL_IP = get_local_ip()
 peers = {}            # peerId → { videoName, username, chunks, chunkSizes, lastSeen, webrtcId, ip }
 signaling_clients = {}  # webrtcId → websocket object
 
-# ─── Demand tracking ─────────────────────────────────────
-# chunk_requests[videoId][chunkIdx] = count of requests in last 60s
-import collections
-chunk_requests = collections.defaultdict(lambda: collections.defaultdict(int))
-chunk_request_times = collections.defaultdict(list)  # (videoId, chunkIdx) → [timestamps]
 
 # ─── Stale peer cleanup thread ───────────────────────────
 def clean_stale_peers():
@@ -358,12 +354,7 @@ def api_peers_list():
     if video_id is None or chunk_id is None:
         return jsonify({"error": "videoId and chunkId required"}), 400
 
-    # Track request for demand scoring
-    now_sec = time.time()
-    key = (str(video_id), int(chunk_id) if chunk_id is not None else 0)
-    chunk_request_times[key].append(now_sec)
-    # Prune old requests (> 60s)
-    chunk_request_times[key] = [t for t in chunk_request_times[key] if now_sec - t < 60]
+
 
     now = time.time() * 1000
     candidates = []
@@ -389,68 +380,14 @@ def api_peers_list():
             "chunks":   peer["chunks"],
         })
 
-    candidates.sort(key=lambda x: x["lastSeen"], reverse=True)
-    result = candidates[:PEER_LIST_K]
+    if len(candidates) <= PEER_LIST_K:
+        result = candidates
+        random.shuffle(result)
+    else:
+        result = random.sample(candidates, PEER_LIST_K)
 
     LOG.info(f'P2P lookup: chunk {chunk_id} of "{video_id}" → {len(result)} peer(s) have it')
     return jsonify({"peers": result})
-
-
-# ─── API: Demand Signal ──────────────────────────────────
-@app.route("/api/demand")
-def api_demand():
-    video_id = request.args.get("videoId")
-    if not video_id:
-        return jsonify({"error": "videoId required"}), 400
-
-    now_sec = time.time()
-    now_ms  = now_sec * 1000
-
-    # Count how many fresh peers hold each chunk
-    peer_count_per_chunk = collections.defaultdict(int)  # chunkIdx → count
-    for pid, peer in peers.items():
-        if peer["videoName"] != video_id:
-            continue
-        if now_ms - peer["lastSeen"] > PEER_FRESH_MS:
-            continue
-        for c in peer["chunks"]:
-            peer_count_per_chunk[c] += 1
-
-    # Collect all chunks known to exist in this video
-    all_chunks = set(peer_count_per_chunk.keys())
-    for pid, peer in peers.items():
-        if peer["videoName"] == video_id:
-            all_chunks.update(peer["chunks"])
-
-    demand_out      = {}
-    peer_counts_out = {}
-
-    for c in all_chunks:
-        c_int = int(c)
-        count = peer_count_per_chunk.get(c_int, 0)
-        peer_counts_out[str(c_int)] = count
-
-        # Rarity-based demand: under-replicated → demand = 1.0
-        if count <= 1:
-            base_demand = 1.0
-        elif count <= 2:
-            base_demand = 0.8
-        else:
-            base_demand = max(0.1, 1.0 / count)
-
-        # Request-frequency boost (last 60s)
-        key = (str(video_id), c_int)
-        recent_requests = len([t for t in chunk_request_times.get(key, []) if now_sec - t < 60])
-        freq_boost = min(recent_requests * 0.1, 0.3)  # up to +0.3
-
-        demand_out[str(c_int)] = round(min(1.0, base_demand + freq_boost), 3)
-
-    LOG.info(f'Demand signal for "{video_id}": {len(demand_out)} chunks')
-    return jsonify({
-        "videoId":    video_id,
-        "demand":     demand_out,
-        "peerCounts": peer_counts_out,
-    })
 
 
 # ─── WebSocket Signaling Server ──────────────────────────

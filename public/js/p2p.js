@@ -45,14 +45,12 @@ async function fetchChunkP2P(segIndex, videoName) {
 
     log(`👥 Found ${peerList.length} peer(s) for seg${segIndex}`);
 
-    // Randomize the peer list to distribute fetch load evenly across the swarm
-    for (let i = peerList.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [peerList[i], peerList[j]] = [peerList[j], peerList[i]];
-    }
+    // 3. Randomize and try peers
+    // Shuffle the peer list so simultaneous parallel fetches don't slam the same top peer
+    peerList.sort(() => Math.random() - 0.5);
+    const candidates = peerList.slice(0, 3); // Max 3 connection attempts per chunk
 
-    // 3. Try each peer in randomized order
-    for (const peer of peerList) {
+    for (const peer of candidates) {
       try {
         const startTime = Date.now();
         await peerManager.getConnection(peer.webrtcId);
@@ -67,6 +65,7 @@ async function fetchChunkP2P(segIndex, videoName) {
         const data = await peerManager.requestChunk(peer.webrtcId, segIndex);
         if (data) {
           const elapsed = Date.now() - startTime;
+          trackNetworkBytes(data.byteLength);
           log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms, ${(data.byteLength/1024).toFixed(0)} KB)`);
           return { data, source: 'p2p', peerName: peer.username };
         } else {

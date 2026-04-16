@@ -8,7 +8,7 @@
 //    1. 'urgent'        → safety zone + urgent zone missing chunks (server only for urgent)
 //    2. 'deterministic' → top-K future chunks by score
 //    3. 'probabilistic' → weighted-random sample from remaining future
-//    4. 'past-demand'   → far-past chunks with high demand or rarity
+//    4. 'past-rarity'   → far-past chunks with high rarity (under-replicated)
 // ═══════════════════════════════════════════════
 class Scheduler {
   constructor(cacheManager, scorer, evictionPolicy) {
@@ -54,13 +54,31 @@ class Scheduler {
       const decision = this._computeFetchList();
       this.lastDecision = decision;
 
-      for (const item of decision) {
-        if (this._inFlight.has(item.segIdx)) continue;
-        if (this.cacheManager.has(item.segIdx)) continue;
-        this._inFlight.add(item.segIdx);
-        // Execute sequentially to avoid P2P race conditions and connection storms.
-        await this._onFetch(item.segIdx, item.priority, item.zone);
+      // Process up to 3 fetches concurrently to maximize throughput without overwhelming WebRTC
+      const jobs = decision.filter(item => !this._inFlight.has(item.segIdx) && !this.cacheManager.has(item.segIdx));
+      
+      const MAX_CONCURRENT_P2P = 3;
+      const workers = [];
+      let jobIndex = 0;
+
+      const worker = async () => {
+        while (jobIndex < jobs.length) {
+          const item = jobs[jobIndex++];
+          this._inFlight.add(item.segIdx);
+          try {
+            await this._onFetch(item.segIdx, item.priority, item.zone);
+          } catch (err) {
+            log(`⚠️ Scheduler fetch error seg${item.segIdx}: ${err.message}`);
+          }
+        }
+      };
+
+      const numWorkers = Math.min(MAX_CONCURRENT_P2P, jobs.length);
+      for (let i = 0; i < numWorkers; i++) {
+        workers.push(worker());
       }
+
+      await Promise.all(workers);
     } finally {
       this._isTicking = false;
     }
@@ -96,7 +114,7 @@ class Scheduler {
     const futureCandidates = [];
     for (let i = safetyHi + 1; i < total; i++) {
       if (this.cacheManager.has(i) || this._inFlight.has(i)) continue;
-      const score = this.scorer.score(i, cur);
+      const score = this.scorer.score(i, cur, 1 /* estimated 1 MB */);
       futureCandidates.push({ segIdx: i, score, zone: 'future' });
     }
     futureCandidates.sort((a, b) => b.score - a.score);
@@ -123,37 +141,15 @@ class Scheduler {
       }
     }
 
-    // 4. Far-past: fetch if very rare, or if we need to fill the cooperative cache quota
-    const pastBudgetMinBytes = PAST_BUDGET_MIN_FRAC * this.cacheManager.budgetBytes;
-    let currentFarPastBytes = 0;
-    for (const entry of this.cacheManager.getAll().values()) {
-      if (entry.zone === 'far-past') currentFarPastBytes += entry.sizeBytes;
-    }
-    
-    let needsCooperativePast = currentFarPastBytes < pastBudgetMinBytes;
-    const pastCandidates = [];
-
-    // Scan all past chunks
+    // 4. Far-past: fetch if very rare (under-replicated in swarm)
     for (let i = safetyLo - 1; i >= 0; i--) {
       if (this.cacheManager.has(i) || this._inFlight.has(i)) continue;
-      pastCandidates.push({ segIdx: i, score: this.scorer.score(i, cur), rarity: this.scorer.rarity(i) });
-    }
-
-    // Sort strategically by highest score/rarity so our cooperative seeding helps the hardest-to-find chunks
-    pastCandidates.sort((a, b) => b.score - a.score);
-
-    for (const c of pastCandidates) {
-      if (c.rarity > 0.7 || needsCooperativePast) {
-        toFetch.push({ segIdx: c.segIdx, zone: 'far-past', priority: 'past-demand' });
-        
-        // If we fetched this just to satisfy the cooperative quota (not because it's super rare)
-        if (needsCooperativePast && c.rarity <= 0.7) {
-          currentFarPastBytes += 1024 * 1024; // Approximate 1MB per chunk
-          if (currentFarPastBytes >= pastBudgetMinBytes) {
-            needsCooperativePast = false; // Quota fulfilled, stop fetching normal past chunks
-          }
-        }
+      const r = this.scorer.rarity(i);
+      if (r > 0.7) {
+        toFetch.push({ segIdx: i, zone: 'far-past', priority: 'past-rarity' });
       }
+      // Only scan up to 10 past chunks to avoid wasted effort
+      if (safetyLo - i >= 10) break;
     }
 
     return toFetch;

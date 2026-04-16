@@ -49,37 +49,6 @@ class CacheManager {
     return true;
   }
 
-  /**
-   * Store a high-demand future chunk that is allowed to exceed the normal budget
-   * by up to OVER_BUDGET_CAP_MB. Used only for future chunks with demand > threshold.
-   * @returns {'stored'|'over-hard-cap'|'invalid'} result code
-   */
-  putOverBudget(segIdx, data, source = 'server') {
-    if (!(data instanceof ArrayBuffer) || data.byteLength === 0) return 'invalid';
-
-    const sizeBytes   = data.byteLength;
-    const hardCapBytes = this.budgetBytes + (OVER_BUDGET_CAP_MB * 1024 * 1024);
-
-    // If already exists, subtract old size
-    if (this.store.has(segIdx)) {
-      this.totalBytes -= this.store.get(segIdx).sizeBytes;
-    }
-
-    if (this.totalBytes + sizeBytes > hardCapBytes) {
-      log(`🚫 CacheManager.putOverBudget seg${segIdx}: exceeds hard cap (${this.totalMB().toFixed(1)} MB + ${(sizeBytes/1024).toFixed(0)} KB > ${(hardCapBytes/(1024*1024)).toFixed(0)} MB)`);
-      return 'over-hard-cap';
-    }
-
-    this.store.set(segIdx, { data, sizeBytes, source, zone: 'future', ts: Date.now(), overBudget: true });
-    this.totalBytes += sizeBytes;
-    this.evictedSet.delete(segIdx);
-    if (source === 'p2p') this.p2pSet.add(segIdx);
-
-    log(`🔥 Cache OVER-BUDGET seg${segIdx} [future/high-demand] — ${(sizeBytes/1024).toFixed(0)} KB via ${source} — total ${this.totalMB().toFixed(1)} MB (budget+${OVER_BUDGET_CAP_MB}MB cap)`);
-    return 'stored';
-  }
-
-
 
   // ─── Read ──────────────────────────────────────
   get(segIdx) {

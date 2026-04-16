@@ -70,6 +70,7 @@ async function loadLibrary() {
 // ─── Scheduler global ───────────────────────────
 let scheduler = null;
 
+
 // ─── Player Open/Close ──────────────────────────
 function openPlayer(name, playlist, title) {
   currentVideoName = name;
@@ -114,7 +115,7 @@ function closePlayer() {
   video.src = '';
   if (statsInterval)    clearInterval(statsInterval);
   if (inventoryInterval) clearInterval(inventoryInterval);
-  inventoryInterval = null;
+
 
   fetch('/api/peers/unregister', {
     method: 'POST',
@@ -137,7 +138,7 @@ backBtn.addEventListener('click', closePlayer);
 //    urgent    → server only (deadline critical)
 //    safety    → P2P first → server fallback
 //    future    → P2P race vs server in parallel (first wins)
-//    far-past  → P2P first → server fallback (demand-gated by scheduler)
+//    far-past  → P2P first → server fallback (rarity-gated by scheduler)
 // ────────────────────────────────────────────────
 async function _schedulerFetch(segIdx, priority, zone, videoName) {
   if (!chunkCache || chunkCache.has(segIdx)) {
@@ -215,19 +216,7 @@ function _storeSchedulerResult(segIdx, data, source, peerName, zone, priority) {
 
   let stored = chunkCache.store(segIdx, data.slice(0), source === 'p2p' ? 'p2p' : 'server');
 
-  // ── High-rarity future override: allow exceeding budget ───────────────
-  if (!stored) {
-    const rarity = chunkCache.scorer ? chunkCache.scorer.rarity(segIdx) : 0;
-    if (rarity >= RARITY_OVERRIDE_THRESHOLD) {
-      log(`🔥 seg${segIdx} [${zone}]: over budget but rarity=${rarity.toFixed(2)} ≥ ${RARITY_OVERRIDE_THRESHOLD} → override storage`);
-      const result = chunkCache.manager.putOverBudget(
-        segIdx,
-        data.slice(0),
-        source === 'p2p' ? 'p2p' : 'server'
-      );
-      stored = (result === 'stored');
-    }
-  }
+
 
   if (!stored) return;
 
@@ -251,8 +240,10 @@ async function _httpFetch(segIdx, videoName) {
     const url = `/stream/${videoName}/seg${String(segIdx).padStart(3, '0')}.ts`;
     const res = await fetch(url);
     if (!res.ok) return null;
-    return await res.arrayBuffer();
-  } catch {
+    const buf = await res.arrayBuffer();
+    trackNetworkBytes(buf.byteLength);
+    return buf;
+  } catch (e) {
     return null;
   }
 }
@@ -418,19 +409,6 @@ function startHls(playlist) {
       const src = chunkCache.isP2P(sn) ? '🌐 P2P' : '📡 HTTP';
       log(`📥 seg${sn} loaded (${src}) — cache: ${chunkCache.manager.totalMB().toFixed(1)} MB / ${CACHE_BUDGET_MB} MB`);
       renderCacheVis();
-
-      const level = hls.levels[hls.currentLevel];
-      let bitrateKbps = 0;
-      
-      if (level && level.bitrate > 0) {
-        bitrateKbps = level.bitrate / 1000;
-      } else {
-        const bytes = data.frag.stats?.total || data.frag.stats?.loaded || 0;
-        const durationSec = data.frag.duration || 1;
-        bitrateKbps = (bytes * 8) / durationSec / 1000;
-      }
-      
-      statBitrate.textContent = `${bitrateKbps.toFixed(0)} kbps`;
     }
   });
 
@@ -467,6 +445,19 @@ function startHls(playlist) {
       statCached.textContent  = chunkCache.cache.size;
       statEvicted.textContent = chunkCache.evictionCount;
     }
+    
+    // ── Update Download Speed UI (Mbps) ──
+    const now = Date.now();
+    while (downloadHistory.length > 0 && now - downloadHistory[0].ts > 3000) {
+      downloadHistory.shift(); // Evict items older than 3 seconds
+    }
+    let sumBytes = 0;
+    for (const item of downloadHistory) sumBytes += item.bytes;
+    const speedMbps = (sumBytes * 8) / 3000000; // Total Megabits / 3 seconds = Mbps
+    if (statSpeed) {
+      statSpeed.textContent = sumBytes > 0 ? `${speedMbps.toFixed(1)} Mbps` : '0.0 Mbps';
+    }
+
     updateP2PStats();
   }, 1000);
 
@@ -489,7 +480,6 @@ function startHls(playlist) {
   sendInventorySync(); // sync immediately on start
 
 
-  // P2P lookups and inventory are handled via P2P.js and Signaling.
 }
 
 // ─── Cache Visualizer ───────────────────────────

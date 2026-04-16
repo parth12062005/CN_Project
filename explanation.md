@@ -9,41 +9,42 @@ When `hls_convertor.py` is run, it uses FFmpeg to execute the following pipeline
 2. **Chunking algorithm:** Parses the video stream at designated keyframes (I-frames) every $N$ seconds (configured to 4). It creates discrete `.ts` (Transport Stream) files representing each temporal chunk of the video.
 3. **Indexing:** Generates an `.m3u8` playlist acting as a simple text ledger of available `.ts` chunks.
 
-## 2. TCP Buffer Strict Contention (The HLS.js Hack)
-Usually, standard video players will aggressively download over TCP to buffer as much video as possible. This breaks P2P, because by the time Peer B connects, Peer A might have downloaded 100% of the video and flushed it from memory.
+## 2. The Independent Temporal Scheduler (`scheduler.js`)
+Usually, standard video players will aggressively download over HTTP to buffer as much video as possible. This destroys P2P efficiency, because by the time Peer B connects, Peer A might have downloaded 100% of the video and flushed the start from memory.
 
+Instead of overriding HLS.js internals, we completely decoupled the chunk downloader into a custom background asynchronous engine.
 **The Algorithm:**
-The HLS.js configuration is strictly bound using `maxBufferLength` corresponding to our Cache $t'$ (lookahead) value.
-If $t' = 5$ and a chunk is 4 seconds:
-$$ maxBufferLength = 5 \times 4 = 20\text{ seconds} $$
+The Scheduler wakes up every 2 seconds (`SCHEDULER_TICK_MS`) and evaluates the `ChunkCache`. It slices the video timeline into zones:
+- **Urgent** $[t, t+10s]$: Dangerously close. Pulled exclusively via HTTP.
+- **Safety** $[t+10s, t+30s]$: Pulled perfectly synchronously from P2P.
+- **Future** $[t+30s, \infty]$: Probabilistically pulled via Bernoulli trials based on computed scores.
+- **Far-Past** $[< t-20s]$: Actively pulled if swarm rarity is dangerously high ($r > 0.7$).
 
-The client reads chunks sequentially over HTTP, and the underlying TCP socket mathematically stops pulling bytes into the network buffer once exactly 20 seconds of video are loaded. It only requests the next chunk when $N$ seconds of video actually play, moving the playhead.
+## 3. Score-Based Memory Management (`ChunkScorer` & `EvictionPolicy`)
+Because video files are enormous, we cannot keep the entire video in a device's RAM. Instead of a fixed slice, we implement a flexible 100MB Budgeted Cache mapped to an exponential temporal-decay equation.
 
-## 3. The Sliding Window Cache ($t$, $t'$)
-Because video files are enormous, we cannot keep the entire video in a device's RAM to share over P2P. We implement an **idempotent sliding-window buffer**.
+**The Scoring Equation:**
+Each chunk in memory is continuously evaluated using:
+$$ Score = \frac{rarity \times \exp(-\lambda \times \text{distance})}{\text{size\_MB}} $$
+- **Rarity**: Swarm inversion $1 / (1 + peers\_having\_chunk)$.
+- **Temporal Decay**: Exponential dropoff $\lambda = 0.005$ based on distance from the playhead.
 
-Let $c$ be the currently playing chunk sequence number.
-Let $t$ be the number of chunks kept *behind* the playhead.
-Let $t'$ be the number of chunks permitted to load *ahead* of the playhead.
-
-**Cache Window Boundaries:**
-$$ [c - t, \quad c + t'] $$
-
-**Eviction Logic (`_evict()`):** 
-On every `FRAG_CHANGED` (when the playhead moves), the `ChunkCache` iteratively drops keys (binary `ArrayBuffers` representing old `.ts` files) that fall below $c - t$. 
-This keeps RAM usage completely static (number of cached chunks = $t + t'$) regardless of if the video is 10 minutes or 10 hours long. Only this subset of integers is reported to the server.
+**Cooperative Eviction Logic (`rebalance` & `makeRoom`):**
+When the 100MB cache fills, the `EvictionPolicy` sorts chunks lowest-score-first and deletes them. However, it behaves **Cooperatively**:
+- It rigidly guarantees retaining a `< PAST_CHUNK_MIN` (15%) bound for consumed past chunks and aggressively trims back down at `PAST_CHUNK_MAX` (20%).
+- This actively stops purely selfish forward-buffering, guaranteeing every peer continuously returns their fair 15% share cache back to the swarm.
 
 ## 4. Peer Discovery & Registry Lookups
-The backend server behaves as a **Centralized Tracker** (similar to BitTorrent).
+The backend server (`server.py`) behaves as a **Centralized Tracker** (similar to BitTorrent).
 Every 5 seconds, each device executes a heartbeat `POST /api/peers/update-cache` sending its peer ID, video identifier, and array of currently cached chunk indices $[c_1, c_2, ...]$.
 
 **In-Memory Lookup Algorithm:**
 When Peer B needs a chunk:
 1. Peer B hits `POST /api/peers/list` providing a `chunkId`.
-2. The Node.js tracking map iteratively filters through all active peers watching that exact video ID.
-3. Drops any peer where `peers[id].lastSeen > 10000ms` (stale connection).
+2. The Python/Flask tracking map iteratively filters through all active peers watching that exact video ID.
+3. Drops any peer where `peers[id]["lastSeen"] > 10000ms` (stale connection).
 4. Drops any peer where the required `chunkId` is NOT in their reported integer array.
-5. Sorts the resulting candidate peers by `lastSeen` (newest first) and takes the top $K$ candidates (where $K=5$).
+5. Employs **Uniform Load Distribution**: instead of bottlenecking all network fetches linearly out of the single oldest peer, it uses a bounded `$K=5$` random uniform sampler (`random.sample()`). The list is randomly shuffled back to the clients, flawlessly dispersing the network upload load across the entire physical LAN swarm.
 
 ## 5. P2P WebRTC Signaling Negotiation
 WebRTC cannot connect directly using an IP. It requires **SDP (Session Description Protocol)** negotiation.
@@ -56,8 +57,11 @@ WebRTC cannot connect directly using an IP. It requires **SDP (Session Descripti
 ## 6. The `P2PLoader` and Binary Slice Transfer
 Once the physical WebRTC link connects, you cannot reliably send a 5MB `.ts` chunk in one burst across a UDP local channel without crashing the Javascript stack or overwhelming max-message limits.
 
-**HLS `fLoader` Override:**
-The player overrides the fundamental network fetch method in HLS.js. Before hitting `fetch()`, it triggers the WebRTC DataChannel check. 
+**DataChannel Glare Protection & Setup:**
+The WebRTC state-machine is guarded via dedicated recursive deduplication mutexes mapping directly to the WebSocket payloads. This stops WebRTC signaling instances from executing overlapping symmetric "Glare" NAT collision storms.
+
+**Concurrent `scheduler.js` pooling:**
+Instead of HLS.js crawling sequential files single-threaded, a secondary background Scheduler evaluates what blocks are urgently missing using temporal-decay equations and Rarity functions. It then spins up exactly `MAX_CONCURRENT_P2P = 3` async network pipe workers. These independently pick the top shuffled peers and violently pull blocks down in parallel, accelerating network ingestion dramatically. 
 
 **Reassembly Protocol:**
 1. Peer B sends `{type: 'chunk_request', chunkId: 5}` over the DataChannel.

@@ -4,9 +4,7 @@
 //  Rules:
 //  1. NEVER evict 'urgent', 'safety', or 'future' zone chunks.
 //  2. ONLY far-past chunks are evictable.
-//  3. Always enforce 20% past budget max cap first.
-//  4. High-demand future chunks may exceed normal budget
-//     (up to OVER_BUDGET_CAP_MB extra) — they are still not evicted.
+//  3. Enforce 20% max past budget and 15% min cooperative retention floor.
 // ═══════════════════════════════════════════════
 class EvictionPolicy {
   /**
@@ -15,8 +13,7 @@ class EvictionPolicy {
    * Returns total bytes freed.
    */
   makeRoom(cacheManager, scorer, currentSeg, neededBytes) {
-    const pastBudgetMaxBytes = PAST_BUDGET_MAX_FRAC * cacheManager.budgetBytes;
-    const pastBudgetMinBytes = PAST_BUDGET_MIN_FRAC * cacheManager.budgetBytes;
+    const pastMinBytes = PAST_CHUNK_MIN * cacheManager.budgetBytes;
     let freed = 0;
 
     // Collect all far-past chunks, scored lowest-first
@@ -26,9 +23,10 @@ class EvictionPolicy {
     for (const [idx, entry] of cacheManager.getAll()) {
       if (entry.zone !== 'far-past') continue;   // future / safety / urgent: untouchable
       pastBytes += entry.sizeBytes;
+      const sizeMB = entry.sizeBytes / (1024 * 1024);
       pastChunks.push({
         idx,
-        scorePerByte: scorer.score(idx, currentSeg) / entry.sizeBytes,
+        scorePerByte: scorer.score(idx, currentSeg, sizeMB) / entry.sizeBytes,
         sizeBytes: entry.sizeBytes,
       });
     }
@@ -38,10 +36,10 @@ class EvictionPolicy {
 
     for (const c of pastChunks) {
       if (freed >= neededBytes) break;
-      // Do not evict if it drops us below the past budget minimum! Safety/Future chunks are priority though, 
-      // but if we are below minimum we probably shouldn't evict past chunk except if it is absolute emergency. 
-      // Wait, the user said "at least 15% SHOULD be past chunks".
-      // But if we need room for urgent chunks, we MUST evict anyway because urgent > past.
+      if (pastBytes - c.sizeBytes < pastMinBytes) {
+        log(`⚠️ EvictionPolicy: Minimum cooperative past chunk retention reached (15%) — halting eviction`);
+        break;
+      }
       cacheManager.remove(c.idx);
       pastBytes -= c.sizeBytes;
       freed     += c.sizeBytes;
@@ -65,25 +63,26 @@ class EvictionPolicy {
       entry.zone = scorer.getZone(idx, currentSeg);
     }
 
-    // Enforce far-past 20% max cap — only evict far-past
-    const pastBudgetMaxBytes = PAST_BUDGET_MAX_FRAC * cacheManager.budgetBytes;
+    // Enforce far-past max cap (20%) — only evict far-past
+    const pastMaxBytes = PAST_CHUNK_MAX * cacheManager.budgetBytes;
     let pastBytes = 0;
     const pastChunks = [];
 
     for (const [idx, entry] of cacheManager.getAll()) {
       if (entry.zone !== 'far-past') continue;
       pastBytes += entry.sizeBytes;
+      const sizeMB = entry.sizeBytes / (1024 * 1024);
       pastChunks.push({
         idx,
-        scorePerByte: scorer.score(idx, currentSeg) / entry.sizeBytes,
+        scorePerByte: scorer.score(idx, currentSeg, sizeMB) / entry.sizeBytes,
         sizeBytes: entry.sizeBytes,
       });
     }
 
-    if (pastBytes > pastBudgetMaxBytes) {
+    if (pastBytes > pastMaxBytes) {
       pastChunks.sort((a, b) => a.scorePerByte - b.scorePerByte);
       for (const c of pastChunks) {
-        if (pastBytes <= pastBudgetMaxBytes) break;
+        if (pastBytes <= pastMaxBytes) break;
         cacheManager.remove(c.idx);
         pastBytes -= c.sizeBytes;
         log(`🗑️ Rebalance: evict far-past seg${c.idx}`);

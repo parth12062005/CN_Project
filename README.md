@@ -14,18 +14,19 @@ The repository consists of exactly 3 core files:
 1. **`hls_convertor.py` (The Preprocessor)**
    A Python script that takes a raw video file (e.g., `video.mp4`) and uses `ffmpeg` to transcode it into H.264/AAC and chop it into 4-second `.ts` (Transport Stream) chunks along with an `.m3u8` playlist. It stores these in the `output/` directory alongside an automatically generated thumbnail.
 
-2. **`server.js` (The Server)**
-   A Node.js Express server that does three things:
-   * **Video Server:** Serves the `.m3u8` playlists and `.ts` chunk files via HTTP to devices on the `.10.x.x` / `192.168.x.x` LAN.
-   * **Peer Registry (P2P API):** Tracks what video each client is watching and what chunks they currently have cached in their memory.
-   * **WebRTC Signaling:** Runs a WebSocket server (`ws://`) that helps browsers negotiate direct P2P connections (via SDP Offers, Answers, and ICE Candidates).
+2. **`server.py` (The Server)**
+   A pure Python backend powered by `Flask` and `flask-sock` (running on Waitress/Eventlet) that does three things:
+   * **Video Server:** Serves the `.m3u8` playlists and `.ts` chunk files via HTTP to devices on the LAN.
+   * **Peer Registry (P2P API):** Tracks what video each client is watching and what chunks they currently have cached in memory. It automatically scrambles and load-balances the peer connection requests.
+   * **WebRTC Signaling:** Runs a WebSocket server (`ws://`) that helps browsers negotiate direct P2P connections (via SDP Offers, Answers, and Glare-resistant ICE Candidates).
 
-3. **`public/index.html` (The Client)**
-   A zero-build vanilla HTML/JS frontend utilizing `HLS.js`. It features:
+3. **`public/` Stack (The Modular Client)**
+   A zero-build vanilla HTML/JS frontend utilizing `HLS.js`, split completely into a strictly decoupled architecture:
    * **Library Interface:** A polished grid to select available videos.
-   * **Sliding Cache (`ChunkCache`):** A strictly managed memory buffer that keeps $t$ chunks behind and $t'$ chunks ahead of the playhead.
-   * **P2P Loader (`P2PLoader`):** A custom HLS.js fragment loader. Before downloading a chunk over HTTP, it queries the server for peers. If another peer is found to have the chunk, it establishes a WebRTC DataChannel to fetch the binary chunk data directly from them.
-   * **Live Stats & Visualizer:** Real-time metrics showing buffer health, cache status, and the percentage of data fetched via P2P.
+   * **Adaptive P2P Scheduler (`scheduler.js`):** Intelligently prioritizes chunks via a probabilistic temporal-decay heuristic. Executes concurrent P2P transfers while halting selfish future-buffering to enforce cooperative peer uploading.
+   * **Sliding Cache (`CacheManager`):** A strictly managed 100MB memory buffer that conditionally retains past chunks (15-20%) to sustain swarm health while trimming old data automatically.
+   * **P2P Loader (`P2PLoader`):** A custom HLS.js fragment loader that intercepts downloads, aggressively pooling connections over WebRTC DataChannels to fetch the binary chunks via an optimized concurrent worker pool.
+   * **Live Stats & Visualizer:** Real-time metrics showing buffer health, live network download speeds (in Mbps), and a dynamic cache map showing HTTP vs P2P transfers.
 
 ---
 
@@ -34,14 +35,13 @@ The repository consists of exactly 3 core files:
 ### Prerequisites
 * **Python 3.x**
 * **FFmpeg** (must be installed on the system path)
-* **Node.js** (v14+ recommended)
 
 ### 1. Installation
 
 1. Clone this repository and enter the directory.
-2. Install the lightweight Node.js dependencies:
+2. Install the necessary Python dependencies:
    ```bash
-   npm install
+   pip install flask flask-cors flask-sock waitress
    ```
 
 ### 2. Preparing a Video
@@ -62,12 +62,12 @@ This will:
 ### 3. Starting the Server
 
 ```bash
-node server.js
+python3 server.py
 ```
 
-The server will automatically detect your local LAN IP and bind to `0.0.0.0`. It will output a sharing URL in the terminal (e.g., `http://192.168.1.5:3000`).
+The server will automatically detect your local LAN IP and bind to `0.0.0.0` on port 3003. It will output a sharing URL in the terminal (e.g., `http://192.168.1.5:3003`).
 
-*(Note: Depending on your firewall settings, you may need to allow traffic on port 3000. Example: `sudo ufw allow 3000/tcp`).*
+*(Note: Depending on your firewall settings, you may need to allow traffic on port 3003. Example: `sudo ufw allow 3003/tcp`).*
 
 ### 4. Watching and P2P Sharing
 

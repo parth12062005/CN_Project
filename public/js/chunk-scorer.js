@@ -1,29 +1,17 @@
 // ═══════════════════════════════════════════════
 //  CHUNK SCORER
 //
-//  Score = rarity × exp(−λ × distance)
+//  Score = (rarity × exp(−λ × distance)) / size_MB
 //
 //  Inputs:
 //    rarity   = 1 / (1 + peers_having_chunk)
 //    distance = |chunk_time − current_time| in seconds
+//    size_MB  = chunk size in megabytes
 // ═══════════════════════════════════════════════
 class ChunkScorer {
   constructor() {
     this.peerCounts = new Map(); // segIdx (int) → int (local tracking)
     this.lambda     = LAMBDA;
-  }
-
-  // ─── Server updates ────────────────────────────
-  /**
-   * Called when /api/demand responds.
-   * payload: { peerCounts: {"12": 2, ...} }
-   */
-  updateFromServer(payload) {
-    if (payload.peerCounts) {
-      for (const [k, v] of Object.entries(payload.peerCounts)) {
-        this.peerCounts.set(parseInt(k), parseInt(v));
-      }
-    }
   }
 
   /** Update peer count for a specific chunk (from P2P lookup responses) */
@@ -44,11 +32,13 @@ class ChunkScorer {
 
   /**
    * Full scoring function.
+   * sizeMB: actual chunk size or estimated (e.g. 1 MB) if unknown
    */
-  score(segIdx, currentSeg) {
+  score(segIdx, currentSeg, sizeMB = 1) {
     const dist = this.distanceSec(segIdx, currentSeg);
     const r    = this.rarity(segIdx);
-    return r * Math.exp(-this.lambda * dist);
+    const sz   = Math.max(sizeMB, 0.01); // guard div-by-zero
+    return (r * Math.exp(-this.lambda * dist)) / sz;
   }
 
   // ─── Zone classification ───────────────────────
@@ -72,3 +62,4 @@ class ChunkScorer {
     return z === 'urgent' || z === 'safety';
   }
 }
+

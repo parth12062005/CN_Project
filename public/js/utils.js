@@ -20,7 +20,7 @@ const copyToast      = document.getElementById('copyToast');
 const logBody        = document.getElementById('logBody');
 
 const statResolution = document.getElementById('statResolution');
-const statBitrate    = document.getElementById('statBitrate');
+const statSpeed      = document.getElementById('statSpeed');
 const statBuffer     = document.getElementById('statBuffer');
 const statSegments   = document.getElementById('statSegments');
 const statCached     = document.getElementById('statCached');
@@ -37,6 +37,12 @@ let currentVideoName = null;
 let segmentCount = 0;
 let statsInterval = null;
 let inventoryInterval = null;
+
+// Real-time Network bandwidth tracker
+const downloadHistory = [];
+function trackNetworkBytes(byteLength) {
+  downloadHistory.push({ ts: Date.now(), bytes: byteLength });
+}
 
 // Logger
 function log(msg) {
