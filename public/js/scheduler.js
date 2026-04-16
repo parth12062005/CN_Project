@@ -96,7 +96,7 @@ class Scheduler {
     const futureCandidates = [];
     for (let i = safetyHi + 1; i < total; i++) {
       if (this.cacheManager.has(i) || this._inFlight.has(i)) continue;
-      const score = this.scorer.score(i, cur, 1 /* estimated 1 MB */);
+      const score = this.scorer.score(i, cur);
       futureCandidates.push({ segIdx: i, score, zone: 'future' });
     }
     futureCandidates.sort((a, b) => b.score - a.score);
@@ -123,16 +123,37 @@ class Scheduler {
       }
     }
 
-    // 4. Far-past: fetch if highly demanded (demand > 0.8) or very rare (rarity > 0.7)
+    // 4. Far-past: fetch if very rare, or if we need to fill the cooperative cache quota
+    const pastBudgetMinBytes = PAST_BUDGET_MIN_FRAC * this.cacheManager.budgetBytes;
+    let currentFarPastBytes = 0;
+    for (const entry of this.cacheManager.getAll().values()) {
+      if (entry.zone === 'far-past') currentFarPastBytes += entry.sizeBytes;
+    }
+    
+    let needsCooperativePast = currentFarPastBytes < pastBudgetMinBytes;
+    const pastCandidates = [];
+
+    // Scan all past chunks
     for (let i = safetyLo - 1; i >= 0; i--) {
       if (this.cacheManager.has(i) || this._inFlight.has(i)) continue;
-      const d = this.scorer.demand(i);
-      const r = this.scorer.rarity(i);
-      if (d > 0.8 || r > 0.7) {
-        toFetch.push({ segIdx: i, zone: 'far-past', priority: 'past-demand' });
+      pastCandidates.push({ segIdx: i, score: this.scorer.score(i, cur), rarity: this.scorer.rarity(i) });
+    }
+
+    // Sort strategically by highest score/rarity so our cooperative seeding helps the hardest-to-find chunks
+    pastCandidates.sort((a, b) => b.score - a.score);
+
+    for (const c of pastCandidates) {
+      if (c.rarity > 0.7 || needsCooperativePast) {
+        toFetch.push({ segIdx: c.segIdx, zone: 'far-past', priority: 'past-demand' });
+        
+        // If we fetched this just to satisfy the cooperative quota (not because it's super rare)
+        if (needsCooperativePast && c.rarity <= 0.7) {
+          currentFarPastBytes += 1024 * 1024; // Approximate 1MB per chunk
+          if (currentFarPastBytes >= pastBudgetMinBytes) {
+            needsCooperativePast = false; // Quota fulfilled, stop fetching normal past chunks
+          }
+        }
       }
-      // Only scan up to 10 past chunks to avoid wasted effort
-      if (safetyLo - i >= 10) break;
     }
 
     return toFetch;

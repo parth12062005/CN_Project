@@ -3,8 +3,9 @@
 // ═══════════════════════════════════════════════
 
 // ─── Cache Budget ────────────────────────────────
-const CACHE_BUDGET_MB = 100;          // total memory budget for chunk storage
-const PAST_BUDGET_FRAC = 0.15;         // max 15% of budget for far-past chunks
+const CACHE_BUDGET_MB = 100;           // total memory budget for chunk storage
+const PAST_BUDGET_MIN_FRAC = 0.15;     // floor for past chunks to maintain swarm cooperation
+const PAST_BUDGET_MAX_FRAC = 0.20;     // max cap before far-past eviction triggers
 
 // ─── Zone Boundaries (seconds relative to playhead) ──
 const URGENT_SEC = 10;           // [t, t+10s]: always server-fetch
@@ -19,11 +20,11 @@ const CHUNK_DURATION = 4;            // seconds per HLS chunk
 const SCHEDULER_TICK_MS = 2000;         // how often scheduler runs
 const TOPK_DET = 4;            // deterministic top-K future chunks (guaranteed)
 // remaining future chunks: each included with p = score/maxScore (Bernoulli)
-const DEMAND_POLL_MS = 10000;        // how often to poll /api/demand
+// remaining future chunks: each included with p = score/maxScore (Bernoulli)
 
-// ─── High-demand override ─────────────────────────
-const DEMAND_OVERRIDE_THRESHOLD = 0.85; // demand above this bypasses budget for future chunks
-const OVER_BUDGET_CAP_MB = 20;          // max MB above normal budget allowed for high-demand future
+// ─── High-rarity override ─────────────────────────
+const RARITY_OVERRIDE_THRESHOLD = 0.85; // rarity above this bypasses budget for future chunks
+const OVER_BUDGET_CAP_MB = 20;          // max MB above normal budget allowed for high-rarity future
 
 
 // ─── P2P / Networking ────────────────────────────

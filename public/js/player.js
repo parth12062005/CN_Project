@@ -69,7 +69,7 @@ async function loadLibrary() {
 
 // ─── Scheduler global ───────────────────────────
 let scheduler = null;
-let demandInterval = null;
+let inventoryInterval = null;
 
 // ─── Player Open/Close ──────────────────────────
 function openPlayer(name, playlist, title) {
@@ -115,7 +115,7 @@ function closePlayer() {
   video.src = '';
   if (statsInterval)    clearInterval(statsInterval);
   if (inventoryInterval) clearInterval(inventoryInterval);
-  if (demandInterval)   clearInterval(demandInterval);
+  inventoryInterval = null;
 
   fetch('/api/peers/unregister', {
     method: 'POST',
@@ -216,11 +216,11 @@ function _storeSchedulerResult(segIdx, data, source, peerName, zone, priority) {
 
   let stored = chunkCache.store(segIdx, data.slice(0), source === 'p2p' ? 'p2p' : 'server');
 
-  // ── High-demand future override: allow exceeding budget ───────────────
-  if (!stored && zone === 'future') {
-    const demand = chunkCache.scorer ? chunkCache.scorer.demand(segIdx) : 0;
-    if (demand >= DEMAND_OVERRIDE_THRESHOLD) {
-      log(`🔥 seg${segIdx} [future]: over budget but demand=${demand.toFixed(2)} ≥ ${DEMAND_OVERRIDE_THRESHOLD} → override storage`);
+  // ── High-rarity future override: allow exceeding budget ───────────────
+  if (!stored) {
+    const rarity = chunkCache.scorer ? chunkCache.scorer.rarity(segIdx) : 0;
+    if (rarity >= RARITY_OVERRIDE_THRESHOLD) {
+      log(`🔥 seg${segIdx} [${zone}]: over budget but rarity=${rarity.toFixed(2)} ≥ ${RARITY_OVERRIDE_THRESHOLD} → override storage`);
       const result = chunkCache.manager.putOverBudget(
         segIdx,
         data.slice(0),
@@ -421,7 +421,17 @@ function startHls(playlist) {
       renderCacheVis();
 
       const level = hls.levels[hls.currentLevel];
-      if (level) statBitrate.textContent = `${(level.bitrate / 1000).toFixed(0)} kbps`;
+      let bitrateKbps = 0;
+      
+      if (level && level.bitrate > 0) {
+        bitrateKbps = level.bitrate / 1000;
+      } else {
+        const bytes = data.frag.stats?.total || data.frag.stats?.loaded || 0;
+        const durationSec = data.frag.duration || 1;
+        bitrateKbps = (bytes * 8) / durationSec / 1000;
+      }
+      
+      statBitrate.textContent = `${bitrateKbps.toFixed(0)} kbps`;
     }
   });
 
@@ -480,16 +490,7 @@ function startHls(playlist) {
   sendInventorySync(); // sync immediately on start
 
 
-  // ─── Demand poll ────────────────────────────────
-  demandInterval = setInterval(async () => {
-    if (!currentVideoName || !chunkCache) return;
-    try {
-      const res = await fetch(`/api/demand?videoId=${encodeURIComponent(currentVideoName)}`);
-      const payload = await res.json();
-      chunkCache.scorer.updateFromServer(payload);
-      log(`📊 Demand updated: ${Object.keys(payload.demand || {}).length} chunks signalled`);
-    } catch { /* silent */ }
-  }, DEMAND_POLL_MS);
+  // P2P lookups and inventory are handled via P2P.js and Signaling.
 }
 
 // ─── Cache Visualizer ───────────────────────────
