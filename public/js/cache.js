@@ -1,83 +1,76 @@
 // ═══════════════════════════════════════════════
-//  CHUNK CACHE CLASS (extended with binary data)
+//  CHUNK CACHE — compatibility shim
 //
-//  Sliding window: [current - t, current + t']
-//  Stores actual ArrayBuffer data so peers
-//  can serve cached chunks via DataChannel.
+//  Wraps CacheManager/ChunkScorer/EvictionPolicy
+//  with the legacy API used by player.js and p2p.js.
+//
+//  Actual storage: CacheManager
+//  Eviction:       EvictionPolicy
+//  Scoring:        ChunkScorer
 // ═══════════════════════════════════════════════
 class ChunkCache {
-  constructor(t, tPrime) {
-    this.t = t;
-    this.tPrime = tPrime;
-    this.cache = new Map();
-    this.evictedSet = new Set();
+  constructor(budgetMB = CACHE_BUDGET_MB) {
+    this._mgr      = new CacheManager(budgetMB);
+    this._scorer   = new ChunkScorer();
+    this._evictor  = new EvictionPolicy();
     this.currentSegment = -1;
-    this.totalSegments = 0;
-    this.evictionCount = 0;
-    this.p2pSet = new Set();
+    this.totalSegments  = 0;
   }
 
-  store(segIndex, data = null, source = 'server') {
-    if (this.currentSegment >= 0) {
-      const lo = this.currentSegment - this.t;
-      if (segIndex < lo) {
-        log(`🗃️ Cache REJECT seg${segIndex} — too old (before ${lo})`);
-        return false;
-      }
+  // ─── Expose internals needed by player.js ──────
+  get cache()         { return this._mgr.store; }          // Map for .size access
+  get evictedSet()    { return this._mgr.evictedSet; }
+  get evictionCount() { return this._mgr.evictionCount; }
+
+  // ─── scorer / manager accessors for new code ──
+  get manager()  { return this._mgr;     }
+  get scorer()   { return this._scorer;  }
+  get evictor()  { return this._evictor; }
+
+  // ─── Legacy write API ──────────────────────────
+  store(segIdx, data, source = 'server') {
+    if (!data || !(data instanceof ArrayBuffer) || data.byteLength === 0) return false;
+
+    const zone = this.currentSegment >= 0
+      ? this._scorer.getZone(segIdx, this.currentSegment)
+      : 'safety';
+
+    // Make room if necessary
+    if (!this._mgr.hasRoom(data.byteLength)) {
+      this._evictor.makeRoom(this._mgr, this._scorer, this.currentSegment, data.byteLength);
     }
-    const dataSize = data ? (data.byteLength || data.length || '?') : 'null';
-    log(`🗃️ Cache STORE seg${segIndex} — source=${source}, dataSize=${dataSize}, type=${data ? data.constructor?.name : 'null'}`);
-    this.cache.set(segIndex, { data, timestamp: Date.now(), source });
-    this.evictedSet.delete(segIndex);
-    if (source === 'p2p') this.p2pSet.add(segIndex);
-    return true;
+
+    return this._mgr.put(segIdx, data, source, zone);
   }
 
-  has(segIndex) { return this.cache.has(segIndex); }
+  // ─── Legacy read API ───────────────────────────
+  has(segIdx)      { return this._mgr.has(segIdx); }
+  getData(segIdx)  { return this._mgr.get(segIdx); }
+  get(segIdx)      { return this._mgr.get(segIdx); }
+  isP2P(segIdx)    { return this._mgr.isP2P(segIdx); }
 
-  getData(segIndex) {
-    const entry = this.cache.get(segIndex);
-    return entry ? entry.data : null;
+  // ─── Playhead advance ──────────────────────────
+  setCurrentSegment(segIdx) {
+    if (segIdx === this.currentSegment) return;
+    this.currentSegment = segIdx;
+    this._evictor.rebalance(this._mgr, this._scorer, segIdx);
   }
 
-  get(segIndex) { return this.getData(segIndex); }
+  // ─── Inventory ─────────────────────────────────
+  getInventory() { return this._mgr.getInventory(); }
 
-  isP2P(segIndex) { return this.p2pSet.has(segIndex); }
+  getInventoryWithSizes() { return this._mgr.getInventoryWithSizes(); }
 
-  setCurrentSegment(segIndex) {
-    if (segIndex === this.currentSegment) return;
-    this.currentSegment = segIndex;
-    this._evict();
-  }
-
-  _evict() {
-    if (this.currentSegment < 0) return;
-    const lo = this.currentSegment - this.t;
-    const toEvict = [];
-    for (const [idx] of this.cache) {
-      if (idx < lo) toEvict.push(idx);
-    }
-    if (toEvict.length > 0) {
-      log(`🗑️ Cache EVICT [${toEvict.join(',')}] — fallen behind ${lo}`);
-    }
-    for (const idx of toEvict) {
-      this.cache.delete(idx);
-      this.evictedSet.add(idx);
-      this.evictionCount++;
-    }
-    return toEvict;
-  }
-
-  getInventory() {
-    return Array.from(this.cache.keys()).sort((a, b) => a - b);
-  }
-
+  // ─── Window info (for visualizer) ──────────────
   getWindow() {
     const cur = Math.max(0, this.currentSegment);
     return {
-      lo: Math.max(0, cur - this.t),
-      hi: Math.min(this.totalSegments - 1, cur + this.tPrime),
+      lo: Math.max(0, cur - Math.floor(SAFETY_PAST_SEC   / CHUNK_DURATION)),
+      hi: Math.min(this.totalSegments - 1, cur + Math.floor(SAFETY_FUTURE_SEC / CHUNK_DURATION)),
       current: cur,
     };
   }
+
+  // ─── Stats ─────────────────────────────────────
+  stats() { return this._mgr.stats(); }
 }

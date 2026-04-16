@@ -106,26 +106,35 @@
       <div class="cache-section">
         <div class="cache-header">
           <span>📦</span> Chunk Cache
-          <span class="cache-params" id="cacheParams">t=? / t'=?</span>
+          <span class="cache-params" id="cacheParams">±20s/30s | 200 MB</span>
+          <span class="cache-mem-label" id="cacheMemLabel">0 / 200 MB</span>
         </div>
+
+        <!-- Memory usage bar -->
+        <div class="cache-mem-bar-wrap">
+          <div class="cache-mem-bar" id="cacheMemBar" style="width:0%"></div>
+          <div class="cache-mem-bar past" id="cacheMemBarPast" style="width:0%"></div>
+        </div>
+
+        <!-- Zone band labels -->
+        <div class="cache-zone-labels">
+          <span class="zone-label past">◀ Far-past</span>
+          <span class="zone-label safety-past">Safety(-20s)</span>
+          <span class="zone-label urgent">Urgent(+10s)</span>
+          <span class="zone-label safety-future">Safety(+30s)</span>
+          <span class="zone-label future">Future ▶</span>
+        </div>
+
         <div class="cache-vis" id="cacheVis"></div>
+
         <div class="cache-legend">
-          <div class="legend-item">
-            <div class="legend-dot" style="background:var(--accent)"></div> Playing
-          </div>
-          <div class="legend-item">
-            <div class="legend-dot" style="background:rgba(108,92,231,0.3)"></div> Cached
-          </div>
-          <div class="legend-item">
-            <div class="legend-dot" style="background:rgba(255,255,255,0.05);border:1px solid var(--border)"></div> Not
-            loaded
-          </div>
-          <div class="legend-item">
-            <div class="legend-dot" style="background:rgba(255,71,87,0.15)"></div> Evicted
-          </div>
-          <div class="legend-item">
-            <div class="legend-dot" style="background:rgba(0,214,143,0.3)"></div> P2P
-          </div>
+          <div class="legend-item"><div class="legend-dot playing"></div> Playing</div>
+          <div class="legend-item"><div class="legend-dot urgent-cached"></div> Urgent</div>
+          <div class="legend-item"><div class="legend-dot cached"></div> Cached (HTTP)</div>
+          <div class="legend-item"><div class="legend-dot p2p"></div> Cached (P2P)</div>
+          <div class="legend-item"><div class="legend-dot evicted"></div> Evicted</div>
+          <div class="legend-item"><div class="legend-dot empty"></div> Not loaded</div>
+          <div class="legend-item"><div class="legend-dot urgent-empty"></div> Urgent (missing!)</div>
         </div>
       </div>
 
@@ -141,6 +150,10 @@
   <!-- Extracted JS Modules (Order matters!) -->
   <script src="js/config.js"></script>
   <script src="js/utils.js"></script>
+  <script src="js/cache-manager.js"></script>
+  <script src="js/chunk-scorer.js"></script>
+  <script src="js/eviction-policy.js"></script>
+  <script src="js/scheduler.js"></script>
   <script src="js/cache.js"></script>
   <script src="js/signaling.js"></script>
   <script src="js/peer-manager.js"></script>

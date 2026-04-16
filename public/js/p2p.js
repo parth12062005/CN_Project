@@ -8,10 +8,10 @@ const p2pStats = { peerHits: 0, serverHits: 0, peerFailures: 0, lastSource: '—
 
 function updateP2PStats() {
   const total = p2pStats.peerHits + p2pStats.serverHits;
-  const pct = total > 0 ? Math.round((p2pStats.peerHits / total) * 100) : 0;
-  const statP2P = document.getElementById('statP2P');
+  const pct   = total > 0 ? Math.round((p2pStats.peerHits / total) * 100) : 0;
+  const statP2P    = document.getElementById('statP2P');
   const statSource = document.getElementById('statSource');
-  if (statP2P) statP2P.textContent = pct + '%';
+  if (statP2P)    statP2P.textContent    = pct + '%';
   if (statSource) statSource.textContent = p2pStats.lastSource;
 }
 
@@ -33,6 +33,11 @@ async function fetchChunkP2P(segIndex, videoName) {
     });
     const { peers: peerList } = await res.json();
 
+    // Feed peer count back into the scorer for future scoring decisions
+    if (chunkCache && chunkCache.scorer) {
+      chunkCache.scorer.updatePeerCount(segIndex, peerList.length);
+    }
+
     if (peerList.length === 0) {
       log(`⚠️ Server returned 0 peers for seg${segIndex}`);
       return null;
@@ -44,7 +49,7 @@ async function fetchChunkP2P(segIndex, videoName) {
     for (const peer of peerList) {
       try {
         const startTime = Date.now();
-        const conn = await peerManager.getConnection(peer.webrtcId);
+        await peerManager.getConnection(peer.webrtcId);
 
         const has = await peerManager.haveChunk(peer.webrtcId, segIndex);
         if (!has) {
@@ -56,7 +61,7 @@ async function fetchChunkP2P(segIndex, videoName) {
         const data = await peerManager.requestChunk(peer.webrtcId, segIndex);
         if (data) {
           const elapsed = Date.now() - startTime;
-          log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms)`);
+          log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms, ${(data.byteLength/1024).toFixed(0)} KB)`);
           return { data, source: 'p2p', peerName: peer.username };
         } else {
           log(`❌ requestChunk returned null for seg${segIndex} (timeout or not found)`);

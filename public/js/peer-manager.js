@@ -10,6 +10,7 @@ class PeerConnectionManager {
     this.signaling = signalingClient;
     this.cache = cache;
     this.connections = new Map();
+    this._pendingConnections = new Map(); // webrtcId → Promise<conn> for deduplication
 
     signalingClient.on('offer', (msg) => this._handleOffer(msg));
     signalingClient.on('answer', (msg) => this._handleAnswer(msg));
@@ -21,17 +22,39 @@ class PeerConnectionManager {
   async getConnection(webrtcId) {
     const existing = this.connections.get(webrtcId);
     if (existing) {
-      log(`🔗 getConnection(${webrtcId.slice(0, 8)}): existing found — ready=${existing.ready}, dc=${existing.dc?.readyState || 'null'}`);
       if (existing.ready && existing.dc && existing.dc.readyState === 'open') {
         existing.lastUsed = Date.now();
         return existing;
       }
-    } else {
-      log(`🔗 getConnection(${webrtcId.slice(0, 8)}): no existing connection`);
+
+      // A connection attempt is already in-flight — wait for it instead of creating another
+      if (this._pendingConnections.has(webrtcId)) {
+        log(`🔗 getConnection(${webrtcId.slice(0, 8)}): waiting for in-flight connection...`);
+        try {
+          return await this._pendingConnections.get(webrtcId);
+        } catch {
+          // In-flight connection failed. Recurse to safely re-enter the deduplication lock
+          // preventing a thundering herd of duplicate retry connections from spawning instantly.
+          log(`🔗 In-flight connection to ${webrtcId.slice(0, 8)} failed — retrying cleanly...`);
+          return await this.getConnection(webrtcId);
+        }
+      }
     }
 
+    // No usable connection, no pending attempt — create one
     log(`🔗 Creating NEW WebRTC connection to ${webrtcId.slice(0, 8)} (initiator=true)…`);
-    return this._createConnection(webrtcId, true);
+    const promise = this._createConnection(webrtcId, true);
+    this._pendingConnections.set(webrtcId, promise);
+
+    try {
+      const conn = await promise;
+      return conn;
+    } catch (err) {
+      log(`❌ Connection to ${webrtcId.slice(0, 8)} failed: ${err.message}`);
+      throw err;
+    } finally {
+      this._pendingConnections.delete(webrtcId);
+    }
   }
 
   async _createConnection(webrtcId, isInitiator) {
@@ -51,73 +74,81 @@ class PeerConnectionManager {
 
     this.connections.set(webrtcId, conn);
 
-    let iceCount = 0;
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        iceCount++;
-        if (iceCount <= 3) log(`🧊 ICE candidate #${iceCount} → ${e.candidate.type} ${e.candidate.protocol} ${e.candidate.address}:${e.candidate.port}`);
+    try {
+      let iceCount = 0;
+      pc.onicecandidate = (e) => {
+        if (e.candidate) {
+          iceCount++;
+          if (iceCount <= 3) log(`🧊 ICE candidate #${iceCount} → ${e.candidate.type} ${e.candidate.protocol} ${e.candidate.address}:${e.candidate.port}`);
+          this.signaling.send({
+            type: 'ice-candidate',
+            target: webrtcId,
+            payload: e.candidate,
+          });
+        } else {
+          log(`🧊 ICE gathering complete (${iceCount} candidates)`);
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        log(`🧊 ICE connection state: ${pc.iceConnectionState}`);
+      };
+
+      pc.onconnectionstatechange = () => {
+        log(`🔗 Connection state: ${pc.connectionState}`);
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          log(`🔗 Connection ${pc.connectionState} — cleaning up ${webrtcId.slice(0, 8)}`);
+          this._cleanup(webrtcId, conn);
+        }
+      };
+
+      if (isInitiator) {
+        log(`🔗 Creating DataChannel 'chunks' (ordered)...`);
+        const dc = pc.createDataChannel('chunks', { ordered: true });
+        dc.binaryType = 'arraybuffer';
+        conn.dc = dc;
+        this._setupDC(dc, webrtcId, conn);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log(`🔗 SDP offer created & sent to ${webrtcId.slice(0, 8)}`);
         this.signaling.send({
-          type: 'ice-candidate',
+          type: 'offer',
           target: webrtcId,
-          payload: e.candidate,
+          payload: pc.localDescription,
+        });
+
+        log(`🔗 Waiting for DataChannel to open...`);
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => { log(`❌ DC open TIMEOUT (5s) for ${webrtcId.slice(0, 8)}`); reject(new Error('DC open timeout')); }, 5000);
+          dc.onopen = () => { clearTimeout(timeout); conn.ready = true; log(`🤝 DataChannel OPEN (outgoing to ${webrtcId.slice(0, 8)}) readyState=${dc.readyState}`); resolve(); };
+          dc.onerror = (e) => { clearTimeout(timeout); log(`❌ DC error: ${e.error?.message || 'unknown'}`); reject(new Error('DC error')); };
+          dc.onclose = () => { clearTimeout(timeout); reject(new Error('DC closed early')); };
         });
       } else {
-        log(`🧊 ICE gathering complete (${iceCount} candidates)`);
+        log(`🔗 Waiting for incoming DataChannel from ${webrtcId.slice(0, 8)}...`);
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => { log(`❌ DC incoming TIMEOUT (5s)`); reject(new Error('DC incoming timeout')); }, 5000);
+          pc.ondatachannel = (evt) => {
+            clearTimeout(timeout);
+            const dc = evt.channel;
+            log(`🔗 Incoming DataChannel received: label=${dc.label}, readyState=${dc.readyState}`);
+            dc.binaryType = 'arraybuffer';
+            conn.dc = dc;
+            this._setupDC(dc, webrtcId, conn);
+            dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel OPEN (incoming from ${webrtcId.slice(0, 8)})`); resolve(); };
+            dc.onerror = (e) => { log(`❌ DC error: ${e.error?.message || 'unknown'}`); reject(new Error('DC error')); };
+            dc.onclose = () => { reject(new Error('DC closed early')); };
+          };
+        });
       }
-    };
 
-    pc.oniceconnectionstatechange = () => {
-      log(`🧊 ICE connection state: ${pc.iceConnectionState}`);
-    };
-
-    pc.onconnectionstatechange = () => {
-      log(`🔗 Connection state: ${pc.connectionState}`);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        log(`🔗 Connection ${pc.connectionState} — cleaning up ${webrtcId.slice(0, 8)}`);
-        this._cleanup(webrtcId);
-      }
-    };
-
-    if (isInitiator) {
-      log(`🔗 Creating DataChannel 'chunks' (ordered)...`);
-      const dc = pc.createDataChannel('chunks', { ordered: true });
-      dc.binaryType = 'arraybuffer';
-      conn.dc = dc;
-      this._setupDC(dc, webrtcId, conn);
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      log(`🔗 SDP offer created & sent to ${webrtcId.slice(0, 8)}`);
-      this.signaling.send({
-        type: 'offer',
-        target: webrtcId,
-        payload: pc.localDescription,
-      });
-
-      log(`🔗 Waiting for DataChannel to open...`);
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => { log(`❌ DC open TIMEOUT (5s) for ${webrtcId.slice(0, 8)}`); reject(new Error('DC open timeout')); }, 5000);
-        dc.onopen = () => { clearTimeout(timeout); conn.ready = true; log(`🤝 DataChannel OPEN (outgoing to ${webrtcId.slice(0, 8)}) readyState=${dc.readyState}`); resolve(); };
-        dc.onerror = (e) => { clearTimeout(timeout); log(`❌ DC error: ${e.error?.message || 'unknown'}`); reject(new Error('DC error')); };
-      });
-    } else {
-      log(`🔗 Waiting for incoming DataChannel from ${webrtcId.slice(0, 8)}...`);
-      await new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => { log(`❌ DC incoming TIMEOUT (5s)`); reject(new Error('DC incoming timeout')); }, 5000);
-        pc.ondatachannel = (evt) => {
-          clearTimeout(timeout);
-          const dc = evt.channel;
-          log(`🔗 Incoming DataChannel received: label=${dc.label}, readyState=${dc.readyState}`);
-          dc.binaryType = 'arraybuffer';
-          conn.dc = dc;
-          this._setupDC(dc, webrtcId, conn);
-          dc.onopen = () => { conn.ready = true; log(`🤝 DataChannel OPEN (incoming from ${webrtcId.slice(0, 8)})`); resolve(); };
-        };
-      });
+      log(`🔗 Connection to ${webrtcId.slice(0, 8)} fully established`);
+      return conn;
+    } catch (e) {
+      if (!conn.glareYield) this._cleanup(webrtcId, conn);
+      throw e;
     }
-
-    log(`🔗 Connection to ${webrtcId.slice(0, 8)} fully established`);
-    return conn;
   }
 
   _setupDC(dc, webrtcId, conn) {
@@ -150,6 +181,7 @@ class PeerConnectionManager {
             received: [],
             receivedBytes: 0,
           });
+          conn._activeChunkId = msg.chunkId; // track which chunk is currently streaming in
         } else if (msg.type === 'chunk_complete') {
           const ra = conn.reassembly.get(msg.chunkId);
           if (ra) {
@@ -173,18 +205,21 @@ class PeerConnectionManager {
           log(`⚠️ Unknown DC message type: ${msg.type}`);
         }
       } else {
-        let found = false;
-        for (const [id, ra] of conn.reassembly) {
-          ra.received.push(new Uint8Array(evt.data));
-          ra.receivedBytes += evt.data.byteLength;
-          if (ra.received.length === 1) {
-            log(`📡 Receiving first binary slice for seg${id}...`);
+        // Binary slice — route to the currently-streaming chunk via _activeChunkId
+        const activeId = conn._activeChunkId;
+        if (activeId !== undefined) {
+          const ra = conn.reassembly.get(activeId);
+          if (ra) {
+            ra.received.push(new Uint8Array(evt.data));
+            ra.receivedBytes += evt.data.byteLength;
+            if (ra.received.length === 1) {
+              log(`📡 Receiving first binary slice for seg${activeId}...`);
+            }
+          } else {
+            log(`⚠️ Binary slice for seg${activeId} but reassembly entry missing!`);
           }
-          found = true;
-          break;
-        }
-        if (!found) {
-          log(`⚠️ Received binary data, but no active reassembly window!`);
+        } else {
+          log(`⚠️ Received binary data but no active chunk tracked`);
         }
       }
     };
@@ -313,9 +348,27 @@ class PeerConnectionManager {
   async _handleOffer(msg) {
     try {
       log(`📨 Received WebRTC OFFER from ${msg.from.slice(0, 8)}`);
-      if (this.connections.has(msg.from)) {
-        log(`📨 Cleaning up existing connection to ${msg.from.slice(0, 8)} before accepting offer`);
-        this._cleanup(msg.from);
+
+      const existing = this.connections.get(msg.from);
+      if (existing) {
+        const pcState = existing.pc ? existing.pc.connectionState : 'none';
+        if (pcState === 'new' || pcState === 'connecting' || pcState === 'connected') {
+          // Glare Tie-Breaker: both initiated simultaneously.
+          // Higher ID wins to prevent both dropping each other's offers and deadlocking.
+          if (WEBRTC_ID > msg.from) {
+            log(`📨 Glare Tie-Breaker: I WIN (my ID ${WEBRTC_ID.slice(0, 8)} > ${msg.from.slice(0, 8)}). Ignoring offer.`);
+            return;
+          } else {
+            log(`📨 Glare Tie-Breaker: I YIELD (my ID ${WEBRTC_ID.slice(0, 8)} < ${msg.from.slice(0, 8)}). Cleaning outgoing to accept incoming.`);
+            if (existing && existing.dc) existing.dc.close();
+            existing.glareYield = true;
+            this._cleanup(msg.from, existing);
+          }
+        } else {
+          // Dead connection — clean up before accepting the new offer
+          log(`📨 Cleaning up dead connection (${pcState}) to ${msg.from.slice(0, 8)} before accepting offer`);
+          this._cleanup(msg.from, existing);
+        }
       }
 
       const pc = new RTCPeerConnection({
@@ -386,19 +439,28 @@ class PeerConnectionManager {
     }
   }
 
-  _cleanup(webrtcId) {
+  _cleanup(webrtcId, specificConn = null) {
     const conn = this.connections.get(webrtcId);
-    if (conn) {
-      log(`🧹 Cleaning up connection to ${webrtcId.slice(0, 8)} — pending=${conn.pendingRequests.size}, reassembly=${conn.reassembly.size}`);
-      if (conn.dc) try { conn.dc.close(); } catch {}
-      if (conn.pc) try { conn.pc.close(); } catch {}
-      for (const [key, req] of conn.pendingRequests) {
-        log(`🧹 Rejecting pending request: ${key}`);
-        clearTimeout(req.timer);
-        req.resolve(null);
-      }
-      this.connections.delete(webrtcId);
+    if (!conn) return;
+    
+    // Safety check: if we expected to clean up a specific connection instance,
+    // but the map now holds a DIFFERENT instance (e.g. newly established incoming connection),
+    // do NOT touch the active connection.
+    if (specificConn && conn !== specificConn) {
+      log(`🧹 Skipping cleanup for ${webrtcId.slice(0, 8)} — map holds a newer connection instance.`);
+      return;
     }
+
+    log(`🧹 Cleaning up connection to ${webrtcId.slice(0, 8)} — pending=${conn.pendingRequests.size}, reassembly=${conn.reassembly.size}`);
+    if (conn.dc) try { conn.dc.close(); } catch {}
+    if (conn.pc) try { conn.pc.close(); } catch {}
+    for (const [key, req] of conn.pendingRequests) {
+      req.resolve(null);
+      clearTimeout(req.timer);
+    }
+    conn.pendingRequests.clear();
+    conn.reassembly.clear();
+    this.connections.delete(webrtcId);
   }
 
   _cleanIdle() {

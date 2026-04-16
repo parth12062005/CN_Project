@@ -21,6 +21,12 @@ PORT = 3003
 BASE_DIR = Path(__file__).parent.resolve()
 OUTPUT_DIR = BASE_DIR / "output"
 PUBLIC_DIR = BASE_DIR / "public"
+LOGS_DIR = BASE_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+SERVER_LOG_FILE = LOGS_DIR / "server_terminal.log"
+
+import re
+ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 # ─── Logger ──────────────────────────────────────────────
 C = {
@@ -43,36 +49,57 @@ def ts():
 
 class LOG:
     @staticmethod
+    def _write_to_file(msg):
+        # Remove ANSI color codes for file log
+        clean_msg = ansi_escape.sub('', msg)
+        with open(SERVER_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(clean_msg + "\n")
+
+    @staticmethod
     def req(method, url, ip, extra=""):
         color = C["green"] if method == "GET" else C["yellow"]
-        print(f'{C["dim"]}{ts()}{C["reset"]} {color}{method:<5}{C["reset"]} {url} {C["dim"]}← {ip}{C["reset"]}{" " + extra if extra else ""}')
+        msg = f'{C["dim"]}{ts()}{C["reset"]} {color}{method:<5}{C["reset"]} {url} {C["dim"]}← {ip}{C["reset"]}{" " + extra if extra else ""}'
+        print(msg)
+        LOG._write_to_file(msg)
 
     @staticmethod
     def chunk(video_name, seg_file, ip, size_bytes):
         size_kb = size_bytes // 1024
-        print(f'{C["dim"]}{ts()}{C["reset"]} {C["cyan"]}CHUNK{C["reset"]} {video_name}/{seg_file} {C["dim"]}({size_kb}KB → {ip}){C["reset"]}')
+        msg = f'{C["dim"]}{ts()}{C["reset"]} {C["cyan"]}CHUNK{C["reset"]} {video_name}/{seg_file} {C["dim"]}({size_kb}KB → {ip}){C["reset"]}'
+        print(msg)
+        LOG._write_to_file(msg)
 
     @staticmethod
     def peer(action, peer_id, details=""):
         color = C["green"] if action == "JOIN" else C["red"] if action == "LEAVE" else C["blue"]
-        print(f'{C["dim"]}{ts()}{C["reset"]} {color}PEER {action}{C["reset"]} {peer_id} {C["dim"]}{details}{C["reset"]}')
+        msg = f'{C["dim"]}{ts()}{C["reset"]} {color}PEER {action}{C["reset"]} {peer_id} {C["dim"]}{details}{C["reset"]}'
+        print(msg)
+        LOG._write_to_file(msg)
 
     @staticmethod
     def cache(peer_id, chunks):
         r = f"[{chunks[0]}…{chunks[-1]}] ({len(chunks)} chunks)" if chunks else "(empty)"
-        print(f'{C["dim"]}{ts()}{C["reset"]} {C["magenta"]}CACHE{C["reset"]} {peer_id} → {r}')
+        msg = f'{C["dim"]}{ts()}{C["reset"]} {C["magenta"]}CACHE{C["reset"]} {peer_id} → {r}'
+        print(msg)
+        LOG._write_to_file(msg)
 
     @staticmethod
     def ws(action, id_, details=""):
-        print(f'{C["dim"]}{ts()}{C["reset"]} {C["blue"]}WS   {C["reset"]} {action} {id_} {C["dim"]}{details}{C["reset"]}')
+        msg = f'{C["dim"]}{ts()}{C["reset"]} {C["blue"]}WS   {C["reset"]} {action} {id_} {C["dim"]}{details}{C["reset"]}'
+        print(msg)
+        LOG._write_to_file(msg)
 
     @staticmethod
     def info(msg):
-        print(f'{C["dim"]}{ts()}{C["reset"]} {C["white"]}INFO {C["reset"]} {msg}')
+        out = f'{C["dim"]}{ts()}{C["reset"]} {C["white"]}INFO {C["reset"]} {msg}'
+        print(out)
+        LOG._write_to_file(out)
 
     @staticmethod
     def warn(msg):
-        print(f'{C["dim"]}{ts()}{C["reset"]} {C["yellow"]}WARN {C["reset"]} {msg}')
+        out = f'{C["dim"]}{ts()}{C["reset"]} {C["yellow"]}WARN {C["reset"]} {msg}'
+        print(out)
+        LOG._write_to_file(out)
 
 
 # ─── LAN IP detection ───────────────────────────────────
@@ -90,8 +117,14 @@ def get_local_ip():
 LOCAL_IP = get_local_ip()
 
 # ─── In-memory peer registry (P2P) ──────────────────────
-peers = {}            # peerId → { videoName, username, chunks, lastSeen, webrtcId, ip }
+peers = {}            # peerId → { videoName, username, chunks, chunkSizes, lastSeen, webrtcId, ip }
 signaling_clients = {}  # webrtcId → websocket object
+
+# ─── Demand tracking ─────────────────────────────────────
+# chunk_requests[videoId][chunkIdx] = count of requests in last 60s
+import collections
+chunk_requests = collections.defaultdict(lambda: collections.defaultdict(int))
+chunk_request_times = collections.defaultdict(list)  # (videoId, chunkIdx) → [timestamps]
 
 # ─── Stale peer cleanup thread ───────────────────────────
 def clean_stale_peers():
@@ -228,6 +261,23 @@ def api_status():
 
 
 # ─── API: Peer Registry (P2P) ───────────────────────────
+@app.route('/api/logs', methods=['POST'])
+def receive_peer_logs():
+    data = request.json or {}
+    msg = data.get('msg', '')
+    peer_name = data.get('username', '').strip()
+    if not peer_name:
+        peer_name = data.get('peerId', 'unknown_peer').strip()
+    
+    # Sanitize peer name for filename
+    safe_name = "".join(c for c in peer_name if c.isalnum() or c in " ._-").strip() or "unknown_peer"
+    
+    log_file = LOGS_DIR / f"{safe_name}.log"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    
+    return jsonify({"status": "ok"})
+
 @app.route("/api/peers/register", methods=["POST"])
 def api_peers_register():
     data = request.get_json(silent=True) or {}
@@ -262,8 +312,9 @@ def api_peers_update_cache():
         LOG.warn(f"Cache update from unknown peer: {peer_id}")
         return jsonify({"error": "peer not registered"}), 404
 
-    peer["chunks"] = data.get("chunks", [])
-    peer["lastSeen"] = time.time() * 1000
+    peer["chunks"]     = data.get("chunks", [])
+    peer["chunkSizes"] = data.get("chunkSizes", {})  # {"12": 3145728, ...}
+    peer["lastSeen"]   = time.time() * 1000
 
     LOG.cache(peer_id, peer["chunks"])
     return jsonify({"ok": True})
@@ -300,12 +351,19 @@ PEER_FRESH_MS = 10000
 @app.route("/api/peers/list", methods=["POST"])
 def api_peers_list():
     data = request.get_json(silent=True) or {}
-    video_id = data.get("videoId")
-    chunk_id = data.get("chunkId")
+    video_id     = data.get("videoId")
+    chunk_id     = data.get("chunkId")
     requester_id = data.get("requesterId")
 
     if video_id is None or chunk_id is None:
         return jsonify({"error": "videoId and chunkId required"}), 400
+
+    # Track request for demand scoring
+    now_sec = time.time()
+    key = (str(video_id), int(chunk_id) if chunk_id is not None else 0)
+    chunk_request_times[key].append(now_sec)
+    # Prune old requests (> 60s)
+    chunk_request_times[key] = [t for t in chunk_request_times[key] if now_sec - t < 60]
 
     now = time.time() * 1000
     candidates = []
@@ -323,12 +381,12 @@ def api_peers_list():
             continue
 
         candidates.append({
-            "peerId": pid,
+            "peerId":   pid,
             "username": peer["username"],
             "webrtcId": peer["webrtcId"],
-            "ip": peer["ip"],
+            "ip":       peer["ip"],
             "lastSeen": peer["lastSeen"],
-            "chunks": peer["chunks"],
+            "chunks":   peer["chunks"],
         })
 
     candidates.sort(key=lambda x: x["lastSeen"], reverse=True)
@@ -336,6 +394,63 @@ def api_peers_list():
 
     LOG.info(f'P2P lookup: chunk {chunk_id} of "{video_id}" → {len(result)} peer(s) have it')
     return jsonify({"peers": result})
+
+
+# ─── API: Demand Signal ──────────────────────────────────
+@app.route("/api/demand")
+def api_demand():
+    video_id = request.args.get("videoId")
+    if not video_id:
+        return jsonify({"error": "videoId required"}), 400
+
+    now_sec = time.time()
+    now_ms  = now_sec * 1000
+
+    # Count how many fresh peers hold each chunk
+    peer_count_per_chunk = collections.defaultdict(int)  # chunkIdx → count
+    for pid, peer in peers.items():
+        if peer["videoName"] != video_id:
+            continue
+        if now_ms - peer["lastSeen"] > PEER_FRESH_MS:
+            continue
+        for c in peer["chunks"]:
+            peer_count_per_chunk[c] += 1
+
+    # Collect all chunks known to exist in this video
+    all_chunks = set(peer_count_per_chunk.keys())
+    for pid, peer in peers.items():
+        if peer["videoName"] == video_id:
+            all_chunks.update(peer["chunks"])
+
+    demand_out      = {}
+    peer_counts_out = {}
+
+    for c in all_chunks:
+        c_int = int(c)
+        count = peer_count_per_chunk.get(c_int, 0)
+        peer_counts_out[str(c_int)] = count
+
+        # Rarity-based demand: under-replicated → demand = 1.0
+        if count <= 1:
+            base_demand = 1.0
+        elif count <= 2:
+            base_demand = 0.8
+        else:
+            base_demand = max(0.1, 1.0 / count)
+
+        # Request-frequency boost (last 60s)
+        key = (str(video_id), c_int)
+        recent_requests = len([t for t in chunk_request_times.get(key, []) if now_sec - t < 60])
+        freq_boost = min(recent_requests * 0.1, 0.3)  # up to +0.3
+
+        demand_out[str(c_int)] = round(min(1.0, base_demand + freq_boost), 3)
+
+    LOG.info(f'Demand signal for "{video_id}": {len(demand_out)} chunks')
+    return jsonify({
+        "videoId":    video_id,
+        "demand":     demand_out,
+        "peerCounts": peer_counts_out,
+    })
 
 
 # ─── WebSocket Signaling Server ──────────────────────────

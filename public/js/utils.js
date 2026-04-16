@@ -48,6 +48,18 @@ function log(msg) {
   logBody.scrollTop = logBody.scrollHeight;
   // Keep max 200 entries
   while (logBody.children.length > 200) logBody.removeChild(logBody.firstChild);
+
+  // Send to server
+  fetch('/api/logs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: typeof USERNAME !== 'undefined' ? USERNAME : '',
+      peerId: typeof PEER_ID !== 'undefined' ? PEER_ID : '',
+      msg: msg,
+      time: time
+    })
+  }).catch(() => {});
 }
 
 // Status updater
