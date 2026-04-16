@@ -45,7 +45,13 @@ async function fetchChunkP2P(segIndex, videoName) {
 
     log(`👥 Found ${peerList.length} peer(s) for seg${segIndex}`);
 
-    // 3. Try each peer in order
+    // Randomize the peer list to distribute fetch load evenly across the swarm
+    for (let i = peerList.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [peerList[i], peerList[j]] = [peerList[j], peerList[i]];
+    }
+
+    // 3. Try each peer in randomized order
     for (const peer of peerList) {
       try {
         const startTime = Date.now();
