@@ -69,7 +69,6 @@ async function loadLibrary() {
 
 // ─── Scheduler global ───────────────────────────
 let scheduler = null;
-let inventoryInterval = null;
 
 // ─── Player Open/Close ──────────────────────────
 function openPlayer(name, playlist, title) {
