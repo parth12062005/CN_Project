@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 import re
+import hashlib
+import json
 
 def get_video_codec(input_file):
     """Detect the video codec of the input file."""
@@ -55,6 +57,27 @@ def generate_thumbnail(input_file, output_dir):
         print(f"   Thumbnail: {thumbnail_path}")
     except subprocess.CalledProcessError:
         print("   ⚠ Thumbnail generation failed (non-fatal)")
+
+def generate_hashes(output_dir):
+    """Compute SHA-256 hash of every .ts chunk and write hashes.json."""
+    hashes = {}
+    chunks = sorted(f for f in os.listdir(output_dir) if f.endswith('.ts'))
+    for chunk_name in chunks:
+        chunk_path = os.path.join(output_dir, chunk_name)
+        sha = hashlib.sha256()
+        with open(chunk_path, 'rb') as f:
+            while True:
+                block = f.read(65536)  # 64 KB read blocks
+                if not block:
+                    break
+                sha.update(block)
+        hashes[chunk_name] = sha.hexdigest()
+
+    hash_file = os.path.join(output_dir, 'hashes.json')
+    with open(hash_file, 'w', encoding='utf-8') as f:
+        json.dump(hashes, f, indent=2)
+
+    print(f"   Hashes:    {len(hashes)} chunk SHA-256 signatures → hashes.json")
 
 def convert_to_hls(input_file, output_base="output", chunk_duration=4):
     if not os.path.exists(input_file):
@@ -110,10 +133,15 @@ def convert_to_hls(input_file, output_base="output", chunk_duration=4):
         print("   Generating thumbnail...")
         generate_thumbnail(input_file, output_dir)
 
+        # Generate SHA-256 integrity hashes
+        print("   Computing SHA-256 chunk hashes...")
+        generate_hashes(output_dir)
+
         print(f"\n📂 Output: {output_dir}/")
         print(f"   Playlist:  index.m3u8")
         print(f"   Chunks:    {len(chunks)} segments")
         print(f"   Thumbnail: thumbnail.jpg")
+        print(f"   Integrity: hashes.json")
         print(f"\n▶ Start server: node server.js")
     except FileNotFoundError:
         print("❌ ffmpeg not found. Install: sudo apt install ffmpeg")

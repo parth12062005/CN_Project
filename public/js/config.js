@@ -27,7 +27,7 @@ const PEER_ID = 'peer_' + Math.random().toString(36).slice(2, 10);
 const WEBRTC_ID = 'wrtc_' + Math.random().toString(36).slice(2, 10);
 const INVENTORY_INTERVAL = 5000;
 const P2P_HAVE_TIMEOUT = 1500;  // ms — must be long enough for a fresh DC round-trip
-const P2P_CHUNK_TIMEOUT = 5000;
+const P2P_CHUNK_TIMEOUT = 10000;
 const CONN_IDLE_TIMEOUT = 30000;
 const DC_CHUNK_SIZE = 16384;        // 16 KB DataChannel slice size
 

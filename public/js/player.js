@@ -106,6 +106,22 @@ function openPlayer(name, playlist, title) {
     body: JSON.stringify({ peerId: PEER_ID, videoName: name, username: USERNAME, webrtcId: WEBRTC_ID }),
   }).catch(() => {});
 
+  // ─── Fetch SHA-256 integrity manifest ──────────
+  chunkHashes = null; // reset for new video
+  fetch(`/stream/${name}/hashes.json`)
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(hashes => {
+      chunkHashes = hashes;
+      const count = Object.keys(hashes).length;
+      log(`🔐 Integrity manifest loaded: ${count} chunk SHA-256 hashes`);
+    })
+    .catch(() => {
+      log(`⚠️ No hashes.json found — P2P integrity checks disabled for this video`);
+    });
+
   startHls(playlist);
 }
 

@@ -70,6 +70,8 @@ class PeerConnectionManager {
       pendingRequests: new Map(),
       ready: false,
       reassembly: new Map(),
+      outgoingQueue: [],
+      isSending: false,
     };
 
     this.connections.set(webrtcId, conn);
@@ -172,8 +174,9 @@ class PeerConnectionManager {
           if (req) { clearTimeout(req.timer); req.resolve(msg.have); conn.pendingRequests.delete('have_' + msg.chunkId); }
           else { log(`⚠️ No pending request found for have_${msg.chunkId}`); }
         } else if (msg.type === 'chunk_request') {
-          log(`📬 Received chunk_request for seg${msg.chunkId} — calling _serveChunk...`);
-          this._serveChunk(dc, msg.chunkId);
+          log(`📬 Received chunk_request for seg${msg.chunkId} — adding to outgoing queue for ${webrtcId.slice(0, 8)}...`);
+          conn.outgoingQueue.push(msg.chunkId);
+          this._processQueue(conn);
         } else if (msg.type === 'chunk_header') {
           log(`📦 chunk_header received for seg${msg.chunkId} — totalSize=${msg.totalSize} bytes (${(msg.totalSize/1024).toFixed(0)}KB)`);
           conn.reassembly.set(msg.chunkId, {
@@ -181,7 +184,6 @@ class PeerConnectionManager {
             received: [],
             receivedBytes: 0,
           });
-          conn._activeChunkId = msg.chunkId; // track which chunk is currently streaming in
         } else if (msg.type === 'chunk_complete') {
           const ra = conn.reassembly.get(msg.chunkId);
           if (ra) {
@@ -205,27 +207,45 @@ class PeerConnectionManager {
           log(`⚠️ Unknown DC message type: ${msg.type}`);
         }
       } else {
-        // Binary slice — route to the currently-streaming chunk via _activeChunkId
-        const activeId = conn._activeChunkId;
-        if (activeId !== undefined) {
-          const ra = conn.reassembly.get(activeId);
-          if (ra) {
-            ra.received.push(new Uint8Array(evt.data));
-            ra.receivedBytes += evt.data.byteLength;
-            if (ra.received.length === 1) {
-              log(`📡 Receiving first binary slice for seg${activeId}...`);
-            }
-          } else {
-            log(`⚠️ Binary slice for seg${activeId} but reassembly entry missing!`);
+        // Binary slice — First 4 bytes identify the chunkId (little-endian)
+        if (evt.data.byteLength < 4) return;
+        
+        const view = new DataView(evt.data);
+        const chunkId = view.getUint32(0, true);
+        const payload = new Uint8Array(evt.data, 4);
+
+        const ra = conn.reassembly.get(chunkId);
+        if (ra) {
+          ra.received.push(payload);
+          ra.receivedBytes += payload.byteLength;
+          if (ra.received.length === 1) {
+            log(`📡 Receiving first binary slice for seg${chunkId}...`);
           }
         } else {
-          log(`⚠️ Received binary data but no active chunk tracked`);
+          log(`⚠️ Binary slice for seg${chunkId} but reassembly entry missing!`);
         }
       }
     };
 
     dc.onclose = () => { log(`🔗 DataChannel CLOSED for ${webrtcId.slice(0, 8)}`); this._cleanup(webrtcId); };
     dc.onerror = (e) => { log(`❌ DataChannel ERROR for ${webrtcId.slice(0, 8)}: ${e.error?.message || 'unknown'}`); this._cleanup(webrtcId); };
+  }
+
+  async _processQueue(conn) {
+    if (conn.isSending || conn.outgoingQueue.length === 0) return;
+    conn.isSending = true;
+    
+    while (conn.outgoingQueue.length > 0) {
+      if (!conn.dc || conn.dc.readyState !== 'open') {
+        log(`⏸️ Stopping queue processing — DC closed or not open`);
+        break;
+      }
+      const chunkId = conn.outgoingQueue.shift();
+      log(`🔄 Processing seg${chunkId} from queue... (${conn.outgoingQueue.length} remaining)`);
+      await this._serveChunk(conn.dc, chunkId);
+    }
+    
+    conn.isSending = false;
   }
 
   async _serveChunk(dc, chunkId) {
@@ -272,7 +292,14 @@ class PeerConnectionManager {
             }
 
             const end = Math.min(offset + DC_CHUNK_SIZE, bytes.byteLength);
-            dc.send(bytes.subarray(offset, end));
+            const slicePayloadLen = end - offset;
+            
+            // Multiplexing header: 4-byte chunk ID + binary payload
+            const sliceMsg = new Uint8Array(4 + slicePayloadLen);
+            new DataView(sliceMsg.buffer).setUint32(0, chunkId, true); // Little-endian
+            sliceMsg.set(bytes.subarray(offset, end), 4);
+            
+            dc.send(sliceMsg);
             offset = end;
             slicesSent++;
 
@@ -289,7 +316,7 @@ class PeerConnectionManager {
         }
       };
 
-      sendSlices();
+      await sendSlices();
 
     } catch (err) {
       log(`❌ DataChannel start send error seg${chunkId}: ${err.message}`);
@@ -374,7 +401,7 @@ class PeerConnectionManager {
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
-      const conn = { pc, dc: null, lastUsed: Date.now(), pendingRequests: new Map(), ready: false, reassembly: new Map() };
+      const conn = { pc, dc: null, lastUsed: Date.now(), pendingRequests: new Map(), ready: false, reassembly: new Map(), outgoingQueue: [], isSending: false };
       this.connections.set(msg.from, conn);
 
       let iceCount = 0;

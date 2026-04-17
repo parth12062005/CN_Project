@@ -64,6 +64,24 @@ async function fetchChunkP2P(segIndex, videoName) {
         log(`📥 Requesting seg${segIndex} from ${peer.username}...`);
         const data = await peerManager.requestChunk(peer.webrtcId, segIndex);
         if (data) {
+          // ── SHA-256 Integrity Validation Gate ──────────────
+          if (chunkHashes) {
+            const segKey = `seg${String(segIndex).padStart(3, '0')}.ts`;
+            const expectedHash = chunkHashes[segKey];
+            if (expectedHash) {
+              const actualHash = await computeSHA256(data);
+              if (actualHash !== expectedHash) {
+                // ✖ CORRUPTED — reject, penalize peer, and continue to next candidate
+                log(`🚨 SECURITY: Corrupted chunk seg${segIndex} from ${peer.username}! Expected ${expectedHash.slice(0, 12)}… got ${actualHash.slice(0, 12)}… — connection dropped.`);
+                peerManager._cleanup(peer.webrtcId);
+                p2pStats.peerFailures++;
+                continue;
+              }
+              log(`🔐 seg${segIndex} integrity verified (SHA-256 match)`);
+            }
+          }
+          // ── End Validation Gate ────────────────────────────
+
           const elapsed = Date.now() - startTime;
           trackNetworkBytes(data.byteLength);
           log(`✅ Peer response success: seg${segIndex} from ${peer.username} (${elapsed}ms, ${(data.byteLength/1024).toFixed(0)} KB)`);
