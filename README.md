@@ -32,7 +32,7 @@ The repository consists of exactly 3 core files:
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Prerequisites:
 * **Python 3.x**
 * **FFmpeg** (must be installed on the system path)
 
